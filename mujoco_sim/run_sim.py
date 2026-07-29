@@ -76,10 +76,6 @@ def run(seed=7, piece_count=4, headless=False, save_dir=Path("output/mujoco")):
 
     moved_bodies = set()
     placement_records = []
-    result_colors = np.array([
-        [.92, .28, .16, 1], [.20, .72, .24, 1],
-        [.18, .42, .86, 1], [.72, .18, .68, 1],
-    ])
     try:
         for order, plan in enumerate(plans):
             print(f"[{order + 1}/{len(plans)}] P{plan.visual_id}: "
@@ -96,9 +92,6 @@ def run(seed=7, piece_count=4, headless=False, save_dir=Path("output/mujoco")):
             if body_id is None or body_id in moved_bodies:
                 raise RuntimeError(f"P{plan.visual_id} 吸附失败：磁铁下方没有可用碎片")
             moved_bodies.add(body_id)
-            geom_id = model.geom(
-                f"piece_{controller.attached_index}_geom").id
-            model.geom_rgba[geom_id] = result_colors[plan.visual_id]
             initial_rot = data.xmat[body_id].reshape(3, 3)
             initial_yaw = math.atan2(initial_rot[1, 0], initial_rot[0, 0])
             placement_records.append((
@@ -159,7 +152,7 @@ def run(seed=7, piece_count=4, headless=False, save_dir=Path("output/mujoco")):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--pieces", type=int, choices=range(1, 5), default=4)
+    parser.add_argument("--pieces", type=int, choices=range(2, 5), default=4)
     parser.add_argument("--headless", action="store_true", help="不打开窗口，适合自动测试")
     parser.add_argument("--output", type=Path, default=Path("output/mujoco"))
     args = parser.parse_args()

@@ -14,6 +14,7 @@ from mujoco_sim.robot_controller import ArmController
 from mujoco_sim.run_sim import render_camera
 from mujoco_sim.scene_builder import build_scene_xml, refresh_piece_geometry
 from mujoco_sim.vision_planner import plan_from_camera_rgb
+from puzzle_sim import resolve_cut_mode
 
 
 def _child(connection, speed):
@@ -50,6 +51,10 @@ def _child(connection, speed):
         # Nominal limits are intentionally conservative for a readable demo.
         duration = max(.75, cartesian_distance / .10, joint_distance / .65)
         samples = max(24, int(duration * 60))
+        # Keep UI traffic near 30 Hz in wall-clock time even at high playback
+        # speed. Sending every simulated frame at 4x can fill the pipe and
+        # block the robot process immediately before placement.
+        emit_stride = max(2, int(math.ceil(2 * float(speed.value))))
         for step in range(samples + 1):
             u = step / samples
             blend = 10 * u ** 3 - 15 * u ** 4 + 6 * u ** 5
@@ -57,7 +62,8 @@ def _child(connection, speed):
                 q_start + (q_goal - q_start) * blend)
             if viewer is not None and viewer.is_running():
                 viewer.sync()
-            if translation_range is not None and step % 2 == 0:
+            if (translation_range is not None and
+                    (step % emit_stride == 0 or step == samples)):
                 lo, hi = translation_range
                 connection.send((
                     "motion_pose", piece,
@@ -84,6 +90,8 @@ def _child(connection, speed):
                 controller.LOWER[5], controller.UPPER[5])
             duration = max(.65, abs(error) / .65)
             samples = max(40, int(duration * 60))
+            emit_stride = max(
+                1, int(math.ceil(2 * float(speed.value))))
             for step in range(samples + 1):
                 u = step / samples
                 blend = 10 * u ** 3 - 15 * u ** 4 + 6 * u ** 5
@@ -91,8 +99,9 @@ def _child(connection, speed):
                     q_start + (q_goal - q_start) * blend)
                 if viewer is not None and viewer.is_running():
                     viewer.sync()
-                connection.send((
-                    "motion_pose", piece, 1.0, float(blend)))
+                if step % emit_stride == 0 or step == samples:
+                    connection.send((
+                        "motion_pose", piece, 1.0, float(blend)))
                 time.sleep(
                     (1 / 60) / max(.1, float(speed.value)))
 
@@ -101,8 +110,11 @@ def _child(connection, speed):
         q_start = controller.ctrl.copy()
         q_goal = controller.HOME.copy()
         joint_distance = float(np.max(np.abs(q_goal - q_start)))
-        duration = max(1.5, joint_distance / .55)
-        samples = max(90, int(duration * 60))
+        # The task is already complete here. Use a faster but still zero-
+        # velocity/acceleration quintic return so the last placement does not
+        # appear to hang for several seconds.
+        duration = max(1.1, joint_distance / .90)
+        samples = max(66, int(duration * 60))
         connection.send(("stage", -1, "机械臂折叠复位"))
         for step in range(samples + 1):
             u = step / samples
@@ -126,13 +138,14 @@ def _child(connection, speed):
                 if command[0] == "generate":
                     seed, requested_count = int(command[1]), int(command[2])
                     material_mode = command[3] if len(command) > 3 else "color"
-                    key = (seed, requested_count, material_mode)
+                    cut_mode = command[4] if len(command) > 4 else "sequential"
+                    key = (seed, requested_count, material_mode, cut_mode)
                     # Reusing an unchanged scene keeps the native MuJoCo
                     # window alive instead of flashing off and on.
                     if renderer is None:
                         piece_count = 4
                         model = mujoco.MjModel.from_xml_string(
-                            build_scene_xml(seed, 4, material_mode))
+                            build_scene_xml(seed, 4, material_mode, cut_mode))
                         data = mujoco.MjData(model)
                         controller = ArmController(model, data, 4)
                         for _ in range(30):
@@ -154,13 +167,16 @@ def _child(connection, speed):
                         mujoco.mj_resetData(model, data)
                         controller.reset_home()
                         refresh_piece_geometry(
-                            model, data, seed, requested_count, material_mode)
+                            model, data, seed, requested_count,
+                            material_mode, cut_mode)
                         for mesh_index in range(4):
-                            mesh_id = model.mesh(
-                                f"piece_mesh_{mesh_index}").id
-                            mujoco.mjr_uploadMesh(
-                                model, renderer._mjr_context, mesh_id)
-                            viewer.update_mesh(mesh_id)
+                            for mesh_name in (
+                                    f"piece_mesh_{mesh_index}",
+                                    f"piece_border_mesh_{mesh_index}"):
+                                mesh_id = model.mesh(mesh_name).id
+                                mujoco.mjr_uploadMesh(
+                                    model, renderer._mjr_context, mesh_id)
+                                viewer.update_mesh(mesh_id)
                         plans = None
                         current_key = key
                         viewer.sync()
@@ -176,20 +192,21 @@ def _child(connection, speed):
                     if renderer is None:
                         raise RuntimeError("请先生成 MuJoCo 场景")
                     rgb = render_camera(model, data, renderer)
-                    plans = plan_from_camera_rgb(rgb)[0]
+                    solver_mode = resolve_cut_mode(
+                        seed, requested_count, cut_mode)
+                    plans = plan_from_camera_rgb(rgb, solver_mode)[0]
                     connection.send(("detected", len(plans)))
                 elif command[0] == "stitch":
                     if renderer is None:
                         raise RuntimeError("请先生成 MuJoCo 场景")
                     if plans is None:
                         rgb = render_camera(model, data, renderer)
-                        plans = plan_from_camera_rgb(rgb)[0]
+                        solver_mode = resolve_cut_mode(
+                            seed, requested_count, cut_mode)
+                        plans = plan_from_camera_rgb(rgb, solver_mode)[0]
                     moved = set()
-                    colors = np.array([
-                        [.92, .28, .16, 1], [.20, .72, .24, 1],
-                        [.18, .42, .86, 1], [.72, .18, .68, 1],
-                    ])
                     for order, plan in enumerate(plans):
+                        is_last = order == len(plans) - 1
                         above_pick = np.r_[plan.pickup_xy, .075]
                         # Piece top is about z=8 mm. The magnetic face stops
                         # exactly 10 mm above it before energizing.
@@ -207,10 +224,6 @@ def _child(connection, speed):
                         initial_rot = data.xmat[body_id].reshape(3, 3)
                         initial_yaw = math.atan2(
                             initial_rot[1, 0], initial_rot[0, 0])
-                        model.geom_rgba[
-                            model.geom(
-                                f"piece_{controller.attached_index}_geom").id
-                        ] = colors[plan.visual_id]
                         # Keep joint6 fixed after energizing: lift and transfer
                         # first, with no piece rotation.
                         move(above_pick, 0)
@@ -227,7 +240,11 @@ def _child(connection, speed):
                         controller.release(drop=True)
                         # Power-off: let the piece visibly fall the remaining
                         # 10 mm onto the paper instead of snapping through it.
-                        for settle_frame in range(24):
+                        connection.send((
+                            "stage", order,
+                            "释放并快速确认落位" if is_last else "释放并确认落位"))
+                        settle_frames = 8 if is_last else 16
+                        for settle_frame in range(settle_frames):
                             for _ in range(8):
                                 controller.physics_step()
                                 free_joint = model.joint(
@@ -243,6 +260,10 @@ def _child(connection, speed):
                             time.sleep(
                                 (1 / 60) / max(.1, float(speed.value)))
                         connection.send(("motion_pose", order, 1.0, 1.0))
+                        connection.send((
+                            "stage", order,
+                            "末块完成，抬升并折叠复位"
+                            if is_last else "抬升前往下一块"))
                         move(above_target, 0)
                     move_to_folded_home()
                     connection.send(("done",))

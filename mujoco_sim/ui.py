@@ -177,11 +177,11 @@ class PuzzleMuJoCoUI(tk.Tk):
         ttk.Spinbox(
             controls, from_=0, to=999999, textvariable=self.seed,
             width=12).grid(row=0, column=1, sticky="ew", pady=4)
-        ttk.Label(controls, text="碎片数量（1～4）").grid(
+        ttk.Label(controls, text="碎片数量（2～4）").grid(
             row=1, column=0, sticky="w", pady=4)
         self.pieces = tk.IntVar(value=4)
         ttk.Spinbox(
-            controls, from_=1, to=4, textvariable=self.pieces,
+            controls, from_=2, to=4, textvariable=self.pieces,
             width=12).grid(row=1, column=1, sticky="ew", pady=4)
         ttk.Label(controls, text="动画速度").grid(
             row=2, column=0, sticky="w", pady=4)
@@ -227,7 +227,7 @@ class PuzzleMuJoCoUI(tk.Tk):
             return
         count = int(self.pieces.get())
         if not 1 <= count <= 4:
-            messagebox.showerror("参数错误", "碎片数量必须为 1～4")
+            messagebox.showerror("参数错误", "碎片数量必须为 2～4")
             return
         self.running = True
         self.start_button.configure(state="disabled")

@@ -43,12 +43,9 @@ def _five_vertex_polygon(polygon: np.ndarray) -> np.ndarray:
 def _mesh_vertices(polygon: np.ndarray, thickness: float = 0.002) -> np.ndarray:
     """Return the fixed-size, centered 3-D vertex array for one piece."""
     local = (polygon - polygon.mean(axis=0)) * PIXEL_TO_METER
-    # MuJoCo collision meshes require consistent Cartesian winding. Source
-    # polygons originate in image coordinates (y downward), so rebuild a CCW
-    # convex boundary before extrusion.
-    local = cv2.convexHull(
-        local.astype(np.float32), clockwise=False,
-        returnPoints=True).reshape(-1, 2).astype(float)
+    # Keep the boundary order: taking a convex hull here would visually fill
+    # the notch of a legal concave pentagon. Generated concave pieces place the
+    # notch so the existing fixed five-vertex fan triangulation remains inside.
     local = _five_vertex_polygon(local)
     n = 5
     half = thickness / 2
@@ -60,6 +57,11 @@ def _mesh_vertices(polygon: np.ndarray, thickness: float = 0.002) -> np.ndarray:
 def _mesh_texcoords(polygon: np.ndarray, vertices: np.ndarray) -> np.ndarray:
     card_xy = vertices[:, :2] / PIXEL_TO_METER + polygon.mean(axis=0)
     return np.c_[card_xy[:, 0] / 400.0, 1.0 - card_xy[:, 1] / 240.0]
+
+
+def _border_polygon(polygon: np.ndarray) -> np.ndarray:
+    center = polygon.mean(axis=0)
+    return center + (polygon - center) * 1.025
 
 
 def _mesh_xml(name: str, polygon: np.ndarray, thickness: float = 0.002) -> str:
@@ -132,21 +134,22 @@ def _sample_placements(polygons, rng: np.random.Generator):
     return placements
 
 
-def generate_scene_geometry(seed: int, piece_count: int):
+def generate_scene_geometry(seed: int, piece_count: int,
+                            cut_mode: str = "sequential"):
     rng = np.random.default_rng(seed)
-    polygons = random_cut(rng, piece_count)
+    polygons = random_cut(rng, piece_count, cut_mode)
     return polygons, _sample_placements(polygons, rng)
 
 
 def refresh_piece_geometry(model, data, seed: int, piece_count: int,
-                           material_mode: str = "color"):
+                           material_mode: str = "color",
+                           cut_mode: str = "sequential"):
     """Refresh fixed piece slots without recompiling or replacing the viewer."""
     import mujoco
 
-    polygons, placements = generate_scene_geometry(seed, piece_count)
+    polygons, placements = generate_scene_geometry(
+        seed, piece_count, cut_mode)
     for index in range(4):
-        mesh_id = model.mesh(f"piece_mesh_{index}").id
-        vertex_address = model.mesh_vertadr[mesh_id]
         joint_id = model.joint(f"piece_{index}_free").id
         qpos_address = model.jnt_qposadr[joint_id]
         visual_id = model.geom(f"piece_{index}_geom").id
@@ -154,21 +157,27 @@ def refresh_piece_geometry(model, data, seed: int, piece_count: int,
         if index < piece_count:
             polygon = polygons[index]
             x, y, angle, radius = placements[index]
-            vertices = _mesh_vertices(polygon)
-            rotation = np.empty(9)
-            mujoco.mju_quat2Mat(rotation, model.mesh_quat[mesh_id])
-            rotation = rotation.reshape(3, 3)
-            # MuJoCo stores mesh vertices in its principal-axis frame.
-            model.mesh_vert[vertex_address:vertex_address + 10] = (
-                vertices - model.mesh_pos[mesh_id]) @ rotation
-            texcoord_address = model.mesh_texcoordadr[mesh_id]
-            if texcoord_address >= 0:
-                model.mesh_texcoord[texcoord_address:texcoord_address + 10] = (
-                    _mesh_texcoords(polygon, vertices))
+            for mesh_name, mesh_polygon in (
+                    (f"piece_mesh_{index}", polygon),
+                    (f"piece_border_mesh_{index}", _border_polygon(polygon))):
+                mesh_id = model.mesh(mesh_name).id
+                vertex_address = model.mesh_vertadr[mesh_id]
+                vertices = _mesh_vertices(mesh_polygon)
+                rotation = np.empty(9)
+                mujoco.mju_quat2Mat(rotation, model.mesh_quat[mesh_id])
+                rotation = rotation.reshape(3, 3)
+                # MuJoCo stores mesh vertices in its principal-axis frame.
+                model.mesh_vert[vertex_address:vertex_address + 10] = (
+                    vertices - model.mesh_pos[mesh_id]) @ rotation
+                texcoord_address = model.mesh_texcoordadr[mesh_id]
+                if texcoord_address >= 0:
+                    model.mesh_texcoord[
+                        texcoord_address:texcoord_address + 10] = (
+                            _mesh_texcoords(mesh_polygon, vertices))
             data.qpos[qpos_address:qpos_address + 7] = [
                 x, y, PIECE_Z,
                 math.cos(angle / 2), 0, 0, math.sin(angle / 2)]
-            model.geom_rgba[visual_id] = [.10, .35, .75, 1]
+            model.geom_rgba[visual_id] = [.96, .96, .96, 1]
             model.geom_matid[visual_id] = model.material(
                 "joker_piece" if material_mode == "joker"
                 else "solid_piece").id
@@ -186,13 +195,17 @@ def refresh_piece_geometry(model, data, seed: int, piece_count: int,
 
 
 def build_scene_xml(seed: int = 7, piece_count: int = 4,
-                    material_mode: str = "color") -> str:
+                    material_mode: str = "color",
+                    cut_mode: str = "sequential") -> str:
     """Return MJCF. Generated geometry never leaves this scene boundary."""
-    polygons, placements = generate_scene_geometry(seed, piece_count)
+    polygons, placements = generate_scene_geometry(seed, piece_count, cut_mode)
 
     mesh_assets = "\n".join(
-        _mesh_xml(f"piece_mesh_{i}", polygon)
+        _mesh_xml(name, mesh_polygon)
         for i, polygon in enumerate(polygons)
+        for name, mesh_polygon in (
+            (f"piece_mesh_{i}", polygon),
+            (f"piece_border_mesh_{i}", _border_polygon(polygon)))
     )
     piper_mesh_dir = ROOT / "mujoco_sim" / "assets" / "piper_l" / "meshes"
     joker_path = ROOT / "mujoco_sim" / "assets" / "cards" / "big_joker.png"
@@ -217,6 +230,10 @@ def build_scene_xml(seed: int = 7, piece_count: int = 4,
           <geom name="piece_{i}_geom" type="mesh" mesh="piece_mesh_{i}"
                 mass="0.00001" material="{piece_material}"
                 contype="0" conaffinity="0"/>
+          <geom name="piece_{i}_border" type="mesh"
+                mesh="piece_border_mesh_{i}" pos="0 0 -0.0002"
+                mass="0.00001" material="piece_border"
+                contype="0" conaffinity="0"/>
           <geom name="piece_{i}_collision" type="cylinder"
                 size="{collision_radius:.6f} 0.001"
                 mass="{mass:.5f}" rgba="0 0 0 0"
@@ -240,12 +257,14 @@ def build_scene_xml(seed: int = 7, piece_count: int = 4,
     <headlight ambient="0.55 0.55 0.55" diffuse="0.75 0.75 0.75"/>
   </visual>
   <asset>
-    <material name="paper" rgba="0.90 0.90 0.90 1"/>
+    <material name="paper" rgba="0.002 0.002 0.002 1"
+              specular="0" shininess="0" reflectance="0"/>
     <material name="table" rgba="0.18 0.20 0.22 1"/>
     <texture name="joker_card" type="2d" file="{joker_path}"/>
-    <material name="solid_piece" rgba="0.10 0.35 0.75 1"/>
+    <material name="solid_piece" rgba="0.92 0.92 0.92 1"/>
+    <material name="piece_border" rgba="0.96 0.96 0.96 1"/>
     <material name="joker_piece" texture="joker_card"
-              rgba="0.42 0.62 0.78 1"/>
+              rgba="0.86 0.86 0.86 1"/>
     {mesh_assets}
     {piper_assets}
   </asset>

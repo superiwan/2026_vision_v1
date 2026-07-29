@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 import base64
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -26,6 +27,7 @@ class PuzzleGUI:
         self.seed = tk.IntVar(value=7)
         self.piece_count = tk.IntVar(value=4)
         self.material_mode = tk.StringVar(value="纯色卡纸")
+        self.cut_mode = tk.StringVar(value="中心放射（原版）")
         self.status = tk.StringVar(value="输入随机种子，然后生成场景")
         self.scene = None
         self.pieces = None
@@ -38,6 +40,7 @@ class PuzzleGUI:
         self.animation_speed = tk.DoubleVar(value=1.0)
         self.mujoco = MuJoCoBridge()
         self.waiting_for_scene = False
+        self.task_started_at = None
 
         self._build_style()
         self._build_layout()
@@ -82,8 +85,8 @@ class PuzzleGUI:
             side="right")
         count_row = ttk.Frame(controls)
         count_row.pack(fill="x", pady=(0, 9))
-        ttk.Label(count_row, text="碎片数量（1～4）").pack(side="left")
-        ttk.Spinbox(count_row, from_=1, to=4, textvariable=self.piece_count,
+        ttk.Label(count_row, text="碎片数量（2～4）").pack(side="left")
+        ttk.Spinbox(count_row, from_=2, to=4, textvariable=self.piece_count,
                     width=12, state="readonly").pack(side="right")
         material_row = ttk.Frame(controls)
         material_row.pack(fill="x", pady=(0, 9))
@@ -92,6 +95,17 @@ class PuzzleGUI:
             material_row, textvariable=self.material_mode, state="readonly",
             values=("纯色卡纸", "大鬼扑克牌"), width=12).pack(side="right")
         self.material_mode.trace_add("write", lambda *_: self.generate())
+        cut_row = ttk.Frame(controls)
+        cut_row.pack(fill="x", pady=(0, 9))
+        ttk.Label(cut_row, text="切割方式").pack(side="left")
+        ttk.Combobox(
+            cut_row, textvariable=self.cut_mode, state="readonly",
+            values=("中心放射（原版）", "边界扇形", "平行斜向条带",
+                    "等分矩形（四块2×2）", "T形分层切割",
+                    "角块多边形", "凹五边形折线切割",
+                    "全类型随机"),
+            width=16).pack(side="right")
+        self.cut_mode.trace_add("write", lambda *_: self.generate())
         speed_row = ttk.Frame(controls)
         speed_row.pack(fill="x", pady=(0, 9))
         ttk.Label(speed_row, text="同步动画速度").pack(side="left")
@@ -179,7 +193,8 @@ class PuzzleGUI:
             self.mujoco.send(
                 "generate", self.seed.get(), count,
                 "joker" if self.material_mode.get() == "大鬼扑克牌"
-                else "color")
+                else "color",
+                self._cut_mode_code())
         except Exception as exc:
             messagebox.showerror("生成失败", str(exc))
 
@@ -190,7 +205,11 @@ class PuzzleGUI:
         try:
             # Detection receives only camera pixels; the generator's polygons,
             # adjacency and true transforms are not retained by the GUI.
-            self.pieces = sim.detect_pieces(self.scene)
+            solver_mode = sim.resolve_cut_mode(
+                self.seed.get(), self.piece_count.get(),
+                self._cut_mode_code())
+            self.pieces = sim.detect_pieces(
+                self.scene, preserve_concavity=(solver_mode == "concave"))
             self.current_image = sim.annotate_detection(self.scene, self.pieces)
             self._show(self.current_image)
             vertices = "，".join(f"P{i}: {len(p)} 个顶点" for i, p in enumerate(self.pieces))
@@ -205,12 +224,27 @@ class PuzzleGUI:
         if self.pieces is None:
             return
         try:
-            self.transforms, self.matches = sim.solve(self.pieces)
+            self.transforms, self.matches = sim.solve(
+                self.pieces, sim.resolve_cut_mode(
+                    self.seed.get(), self.piece_count.get(),
+                    self._cut_mode_code()))
             self._write_results()
             self.status.set("视觉规划完成，正在同步启动 PIPER-L 拼接…")
             self.mujoco.send("stitch")
         except Exception as exc:
             messagebox.showerror("拼接失败", str(exc))
+
+    def _cut_mode_code(self):
+        return {
+            "中心放射（原版）": "common",
+            "边界扇形": "boundary_fan",
+            "平行斜向条带": "strips",
+            "等分矩形（四块2×2）": "equal_rectangles",
+            "T形分层切割": "t_junction",
+            "角块多边形": "corner",
+            "凹五边形折线切割": "concave",
+            "全类型随机": "mixed",
+        }[self.cut_mode.get()]
 
     def _start_motion_animation(self):
         """Move pieces one by one using their solved SE(2) transforms."""
@@ -224,7 +258,7 @@ class PuzzleGUI:
         if rotation_t is None:
             rotation_t = translation_t
         frame = sim.render_scene([])
-        colors = [(70, 100, 230), (70, 190, 80), (220, 120, 60), (170, 70, 190)]
+        colors = [sim.PIECE_BGR] * 4
         for i, piece in enumerate(self.pieces):
             if i < piece_index:
                 shown, color = sim.apply_h(piece, self.transforms[i]), colors[i]
@@ -241,7 +275,7 @@ class PuzzleGUI:
                 local = piece - src_center
                 c, s = math.cos(angle * rotate_t), math.sin(angle * rotate_t)
                 shown = local @ np.array([[c, -s], [s, c]]).T + center
-                color = (0, 180, 255)
+                color = sim.PIECE_BGR
             else:
                 shown, color = piece, sim.PIECE_BGR
             pts = np.round(shown).astype(np.int32)
@@ -249,7 +283,7 @@ class PuzzleGUI:
             cv2.polylines(frame, [pts], True, (25, 25, 25), 2, cv2.LINE_AA)
             center = np.round(shown.mean(axis=0)).astype(int)
             cv2.putText(frame, f"P{i}", tuple(center), cv2.FONT_HERSHEY_SIMPLEX,
-                        .65, (255, 255, 255), 2, cv2.LINE_AA)
+                        .65, (20, 20, 20), 2, cv2.LINE_AA)
         self.current_image = frame
         self._show(frame)
 
@@ -260,7 +294,22 @@ class PuzzleGUI:
 
     def _poll_mujoco(self):
         try:
+            # Drain the IPC pipe first and collapse bursts of motion frames.
+            # At 2x/4x playback only the newest pose matters visually; status,
+            # error and completion events remain ordered and lossless.
+            compacted = []
+            pending_motion = None
             for event in self.mujoco.poll():
+                if event[0] in {"motion", "motion_pose"}:
+                    pending_motion = event
+                    continue
+                if pending_motion is not None:
+                    compacted.append(pending_motion)
+                    pending_motion = None
+                compacted.append(event)
+            if pending_motion is not None:
+                compacted.append(pending_motion)
+            for event in compacted:
                 if event[0] == "generated":
                     self.waiting_for_scene = False
                     self.scene = event[1]
@@ -269,7 +318,8 @@ class PuzzleGUI:
                     self.status.set(
                         f"种子 {self.seed.get()}：视觉页面与 MuJoCo 已同步生成 "
                         f"{self.piece_count.get()} 块碎片；"
-                        f"素材={self.material_mode.get()}")
+                        f"素材={self.material_mode.get()}；"
+                        f"切割={self.cut_mode.get()}")
                 elif event[0] == "detected":
                     self.status.set(
                         f"视觉识别已同步到 MuJoCo：检测到 {event[1]} 块碎片")
@@ -285,13 +335,26 @@ class PuzzleGUI:
                     self._render_motion_state(
                         event[1], event[2], event[3])
                 elif event[0] == "done":
+                    if (self.scene is None or self.pieces is None or
+                            self.transforms is None):
+                        continue
                     self.current_image = sim.render_solution(
                         self.scene, self.pieces, self.transforms,
                         preserve_texture=(
                             self.material_mode.get() == "大鬼扑克牌"))
                     self._show(self.current_image)
-                    self.status.set(
-                        "双窗口同步拼接完成：目标矩形 10 cm × 6 cm")
+                    if self.task_started_at is not None:
+                        elapsed = time.monotonic() - self.task_started_at
+                        verdict = "满足 2 分钟要求" if elapsed <= 120 else "超过 2 分钟"
+                        self.status.set(
+                            f"双窗口同步拼接完成：10 cm × 6 cm；"
+                            f"用时 {elapsed:.1f} s（{verdict}）")
+                        self.task_started_at = None
+                    else:
+                        self.status.set(
+                            "双窗口同步拼接完成：目标矩形 10 cm × 6 cm")
+                    # 仿真端用系统提示音模拟题目要求的完成声/光指示。
+                    self.root.bell()
                 elif event[0] == "error":
                     messagebox.showerror("MuJoCo 仿真错误", event[1])
                     self.status.set("MuJoCo 仿真失败：" + event[1])
@@ -319,7 +382,7 @@ class PuzzleGUI:
         # Smooth acceleration/deceleration instead of a visually abrupt linear move.
         t = t * t * (3.0 - 2.0 * t)
         frame = sim.render_scene([])
-        colors = [(70, 100, 230), (70, 190, 80), (220, 120, 60), (170, 70, 190)]
+        colors = [sim.PIECE_BGR] * 4
         for i, piece in enumerate(self.pieces):
             if i < self.animation_piece:
                 shown = sim.apply_h(piece, self.transforms[i])
@@ -334,7 +397,7 @@ class PuzzleGUI:
                 c, s = math.cos(angle * t), math.sin(angle * t)
                 rot = np.array([[c, -s], [s, c]])
                 shown = local @ rot.T + center
-                color = (0, 180, 255)
+                color = sim.PIECE_BGR
             else:
                 shown = piece
                 color = sim.PIECE_BGR
@@ -343,7 +406,7 @@ class PuzzleGUI:
             cv2.polylines(frame, [pts], True, (25, 25, 25), 2, cv2.LINE_AA)
             center = np.round(shown.mean(axis=0)).astype(int)
             cv2.putText(frame, f"P{i}", tuple(center), cv2.FONT_HERSHEY_SIMPLEX,
-                        .65, (255, 255, 255), 2, cv2.LINE_AA)
+                        .65, (20, 20, 20), 2, cv2.LINE_AA)
 
         self.current_image = frame
         self._show(frame)
@@ -378,15 +441,20 @@ class PuzzleGUI:
 
         self.edge_text.delete("1.0", "end")
         self.edge_text.insert("end", "算法识别出的内部切割边：\n\n")
-        for k, (err, i, ei, j, ej) in enumerate(self.matches, 1):
+        for k, match in enumerate(self.matches, 1):
+            err, i, ei, j, ej = match[:5]
+            partial = tuple(match[5:]) != (0., 1., 0., 1.)
             self.edge_text.insert(
                 "end", f"{k}. P{i} 的边 {ei} ↔ P{j} 的边 {ej}\n"
-                       f"   相对长度误差：{err * 100:.3f}%\n\n")
+                       f"   类型：{'部分边 / T形' if partial else '完整边'}\n"
+                       f"   匹配代价：{err * 100:.3f}%\n\n")
         self.edge_text.insert(
             "end", "边编号对应检测图中的红色顶点序号；边 i 是顶点 i 到下一个顶点。")
 
     def auto_demo(self):
         self.generate()
+        # 现场随机摆片发生在一键启动之前；计时从视觉识别开始。
+        self.task_started_at = time.monotonic()
         self.status.set("自动演示：场景已生成，即将进行视觉识别…")
         self.root.after(700, self._auto_detect)
 

@@ -37,13 +37,13 @@ def pixel_to_world(pixel_xy, width=900, height=1200, camera_z=.650,
     return np.array([x, y])
 
 
-def plan_from_camera_rgb(rgb_image: np.ndarray):
+def plan_from_camera_rgb(rgb_image: np.ndarray, cut_mode: str = "auto"):
     """No simulator state or generated geometry is accepted by this function."""
     bgr = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
     # MuJoCo's headlight can saturate the blue material to V=255. Apply a
     # camera-like exposure correction before the unchanged core detector.
     vision_bgr = np.clip(bgr.astype(np.float32) * .85, 0, 255).astype(np.uint8)
-    pieces, transforms, matches = analyze_camera_frame(vision_bgr)
+    pieces, transforms, matches = analyze_camera_frame(vision_bgr, cut_mode)
     plans = []
     restored = [apply_h(piece, transform)
                 for piece, transform in zip(pieces, transforms)]
