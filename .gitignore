@@ -12,6 +12,7 @@ dist/
 
 # 独立程序发布压缩包（通过 GitHub Release 发布）
 拼图视觉仿真_Linux_*.zip
+*Linux_x86_64.zip
 
 # 编辑器与系统文件
 .idea/

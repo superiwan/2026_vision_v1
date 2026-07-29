@@ -20,8 +20,20 @@ PIECE_BGR = (190, 95, 30)
 PAPER_BGR = (238, 238, 238)
 
 
-def random_cut(rng: np.random.Generator) -> list[np.ndarray]:
-    """Return four clockwise polygons cut from a CARD_W x CARD_H rectangle."""
+def random_cut(rng: np.random.Generator, piece_count: int = 4) -> list[np.ndarray]:
+    """Return 1-4 clockwise polygons cut from a CARD_W x CARD_H rectangle."""
+    if not 1 <= piece_count <= 4:
+        raise ValueError("碎片数量必须在 1～4 之间")
+    tl, tr = np.array([0., 0.]), np.array([CARD_W, 0.])
+    br, bl = np.array([CARD_W, CARD_H]), np.array([0., CARD_H])
+    if piece_count == 1:
+        return [np.array([tl, tr, br, bl])]
+    if piece_count == 2:
+        # One straight random cut from top to bottom.
+        t = np.array([rng.uniform(.25, .75) * CARD_W, 0.0])
+        b = np.array([rng.uniform(.25, .75) * CARD_W, CARD_H])
+        return [np.array([tl, t, b, bl]), np.array([t, tr, br, b])]
+
     cx = rng.uniform(0.38, 0.62) * CARD_W
     cy = rng.uniform(0.35, 0.65) * CARD_H
     t = np.array([rng.uniform(.25, .75) * CARD_W, 0.0])
@@ -29,8 +41,19 @@ def random_cut(rng: np.random.Generator) -> list[np.ndarray]:
     b = np.array([rng.uniform(.25, .75) * CARD_W, CARD_H])
     l = np.array([0.0, rng.uniform(.25, .75) * CARD_H])
     c = np.array([cx, cy])
-    tl, tr = np.array([0., 0.]), np.array([CARD_W, 0.])
-    br, bl = np.array([CARD_W, CARD_H]), np.array([0., CARD_H])
+    if piece_count == 3:
+        # Keep the three rays well separated. This avoids near-collinear shallow
+        # corners being lost by camera rasterization while retaining randomness.
+        c = np.array([rng.uniform(.43, .57) * CARD_W,
+                      rng.uniform(.34, .48) * CARD_H])
+        t = np.array([rng.uniform(.32, .68) * CARD_W, 0.0])
+        r = np.array([CARD_W, rng.uniform(.65, .82) * CARD_H])
+        l = np.array([0.0, rng.uniform(.65, .82) * CARD_H])
+        return [
+            np.array([t, tr, r, c]),
+            np.array([r, br, bl, l, c]),
+            np.array([l, tl, t, c]),
+        ]
     return [
         np.array([tl, t, c, l]),
         np.array([t, tr, r, c]),
@@ -52,7 +75,11 @@ def apply_h(points: np.ndarray, h: np.ndarray) -> np.ndarray:
 def place_randomly(polys: list[np.ndarray], rng: np.random.Generator):
     placed, poses = [], []
     occupancy = np.zeros((DIVIDER_Y - 25, CANVAS_W), np.uint8)
-    for poly in polys:
+    # Place large pieces first so that 3-piece layouts do not trap the largest
+    # sector in the remaining narrow gaps.
+    ordered = sorted(polys, key=lambda p: abs(cv2.contourArea(p.astype(np.float32))),
+                     reverse=True)
+    for poly in ordered:
         centroid = poly.mean(axis=0)
         local = poly - centroid
         accepted = False
@@ -90,7 +117,9 @@ def render_scene(placed: list[np.ndarray]) -> np.ndarray:
     for poly in placed:
         pts = np.round(poly).astype(np.int32)
         cv2.fillPoly(image, [pts], PIECE_BGR, lineType=cv2.LINE_8)
-        cv2.polylines(image, [pts], True, (30, 30, 30), 2, cv2.LINE_AA)
+        # Use a darker color of the same hue so the visual border remains part
+        # of the segmented foreground instead of clipping polygon corners.
+        cv2.polylines(image, [pts], True, (105, 52, 16), 2, cv2.LINE_AA)
     return image
 
 
@@ -100,7 +129,7 @@ def order_clockwise(vertices: np.ndarray) -> np.ndarray:
     return vertices[np.argsort(a)]
 
 
-def detect_pieces(image: np.ndarray) -> list[np.ndarray]:
+def detect_pieces(image: np.ndarray, expected_count: int | None = None) -> list[np.ndarray]:
     hsv = cv2.cvtColor(image[:DIVIDER_Y], cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, (5, 80, 40), (140, 255, 245))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
@@ -110,12 +139,14 @@ def detect_pieces(image: np.ndarray) -> list[np.ndarray]:
         if cv2.contourArea(cnt) < 3000:
             continue
         peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.012 * peri, True).reshape(-1, 2).astype(float)
+        approx = cv2.approxPolyDP(cnt, 0.01 * peri, True).reshape(-1, 2).astype(float)
         if 3 <= len(approx) <= 5:
             pieces.append(order_clockwise(approx))
     pieces.sort(key=lambda p: (p.mean(0)[1], p.mean(0)[0]))
-    if len(pieces) != 4:
-        raise RuntimeError(f"视觉检测到 {len(pieces)} 块碎片，预期为 4")
+    if not 1 <= len(pieces) <= 4:
+        raise RuntimeError(f"视觉检测到 {len(pieces)} 块碎片，赛题要求为 1～4 块")
+    if expected_count is not None and len(pieces) != expected_count:
+        raise RuntimeError(f"视觉检测到 {len(pieces)} 块碎片，设置数量为 {expected_count}")
     return pieces
 
 
@@ -143,19 +174,28 @@ def candidate_matchings(pieces: list[np.ndarray]):
         c, d = all_edges[(j, ej)]
         la, lb = np.linalg.norm(b - a), np.linalg.norm(d - c)
         rel = abs(la - lb) / max(la, lb)
-        if rel < 0.045:
+        # Rasterized shallow vertices (especially on legal five-sided pieces)
+        # can shift an endpoint by several pixels, so use a tolerant shortlist;
+        # final selection is decided by closure, overlap and rectangle fill.
+        if rel < 0.12:
             candidates.append((rel, i, ei, j, ej))
     candidates.sort()
     # Keep ambiguity bounded while preserving all near-exact cut-edge matches.
-    return candidates[:20]
+    return candidates[:40]
 
 
 def matching_sets(pieces: list[np.ndarray]):
+    count = len(pieces)
+    if count == 1:
+        yield ()
+        return
     cand = candidate_matchings(pieces)
-    for combo in itertools.combinations(cand, 4):
-        used, degree = set(), [0] * 4
+    pair_count = 1 if count == 2 else count
+    required_degree = [1] * count if count == 2 else [2] * count
+    for combo in itertools.combinations(cand, pair_count):
+        used, degree = set(), [0] * count
         ok = True
-        graph = [set() for _ in range(4)]
+        graph = [set() for _ in range(count)]
         for _, i, ei, j, ej in combo:
             if (i, ei) in used or (j, ej) in used:
                 ok = False
@@ -165,7 +205,7 @@ def matching_sets(pieces: list[np.ndarray]):
             degree[j] += 1
             graph[i].add(j)
             graph[j].add(i)
-        if not ok or degree != [2, 2, 2, 2]:
+        if not ok or degree != required_degree:
             continue
         seen, stack = {0}, [0]
         while stack:
@@ -173,7 +213,7 @@ def matching_sets(pieces: list[np.ndarray]):
                 if j not in seen:
                     seen.add(j)
                     stack.append(j)
-        if len(seen) == 4:
+        if len(seen) == count:
             yield combo
 
 
@@ -182,7 +222,7 @@ def assemble_from_matches(pieces, matches):
     for _, i, ei, j, ej in matches:
         adjacency[i].append((j, ei, ej))
         adjacency[j].append((i, ej, ei))
-    transforms = [None] * 4
+    transforms = [None] * len(pieces)
     transforms[0] = np.eye(3)
     stack = [0]
     closure_error = 0.0
@@ -230,7 +270,7 @@ def solve(pieces: list[np.ndarray]):
         if best is None or result[0] < best[0]:
             best = (*result, matches)
     if best is None:
-        raise RuntimeError("未找到满足边长配对与四片环形邻接关系的拼接")
+        raise RuntimeError("未找到满足边长配对与碎片邻接关系的拼接")
     _, transforms, assembled, matches = best
 
     # Normalize recovered rectangle to the requested lower-half target.
@@ -292,12 +332,12 @@ def make_summary(scene, detected, solution):
     return np.hstack(panels)
 
 
-def run_once(seed: int, output: Path, save=True):
+def run_once(seed: int, output: Path, save=True, piece_count: int = 4):
     rng = np.random.default_rng(seed)
-    source = random_cut(rng)
+    source = random_cut(rng, piece_count)
     placed, _ground_truth = place_randomly(source, rng)
     scene = render_scene(placed)
-    detected_pieces = detect_pieces(scene)
+    detected_pieces = detect_pieces(scene, piece_count)
     transforms, matches = solve(detected_pieces)
 
     # Pixel-domain reconstruction metrics.
@@ -328,6 +368,7 @@ def run_once(seed: int, output: Path, save=True):
             })
         data = {
             "seed": seed,
+            "piece_count": piece_count,
             "coordinate_system": "image pixels: x right, y down",
             "target_rectangle_px": {"x": 240, "y": 770, "width": CARD_W, "height": CARD_H},
             "matched_cut_edges": [[int(i), int(ei), int(j), int(ej)]
@@ -344,13 +385,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=7, help="随机种子")
     parser.add_argument("--output", type=Path, default=Path("output/demo"), help="输出目录")
+    parser.add_argument("--pieces", type=int, choices=range(1, 5), default=4,
+                        help="碎片数量，范围 1～4")
     parser.add_argument("--batch", type=int, default=0, help="批量验证次数（不保存图片）")
     args = parser.parse_args()
     if args.batch:
         errors, failures = [], []
         for seed in range(args.seed, args.seed + args.batch):
             try:
-                errors.append(run_once(seed, args.output, save=False))
+                errors.append(run_once(seed, args.output, save=False, piece_count=args.pieces))
             except Exception as exc:
                 failures.append((seed, str(exc)))
         print(f"批量测试: {args.batch} 次，成功 {len(errors)}，失败 {len(failures)}")
@@ -360,7 +403,7 @@ def main():
             print("失败样例:", failures[:10])
             raise SystemExit(1)
     else:
-        err = run_once(args.seed, args.output, save=True)
+        err = run_once(args.seed, args.output, save=True, piece_count=args.pieces)
         print(f"完成。输出目录: {args.output.resolve()}")
         print(f"还原矩形尺寸误差: {err:.3f} px")
         print(f"位姿矩阵: {(args.output / 'transforms.json').resolve()}")

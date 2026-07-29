@@ -23,6 +23,7 @@ class PuzzleGUI:
         root.minsize(1050, 720)
 
         self.seed = tk.IntVar(value=7)
+        self.piece_count = tk.IntVar(value=4)
         self.status = tk.StringVar(value="输入随机种子，然后生成场景")
         self.scene = None
         self.pieces = None
@@ -70,6 +71,11 @@ class PuzzleGUI:
         ttk.Label(seed_row, text="随机种子").pack(side="left")
         ttk.Spinbox(seed_row, from_=0, to=999999, textvariable=self.seed, width=12).pack(
             side="right")
+        count_row = ttk.Frame(controls)
+        count_row.pack(fill="x", pady=(0, 9))
+        ttk.Label(count_row, text="碎片数量（1～4）").pack(side="left")
+        ttk.Spinbox(count_row, from_=1, to=4, textvariable=self.piece_count,
+                    width=12, state="readonly").pack(side="right")
 
         buttons = ttk.Frame(controls)
         buttons.pack(fill="x")
@@ -133,7 +139,8 @@ class PuzzleGUI:
     def generate(self):
         try:
             rng = np.random.default_rng(self.seed.get())
-            source = sim.random_cut(rng)
+            count = self.piece_count.get()
+            source = sim.random_cut(rng, count)
             placed, _ = sim.place_randomly(source, rng)
             self.scene = sim.render_scene(placed)
             self.pieces = self.transforms = self.matches = None
@@ -141,7 +148,7 @@ class PuzzleGUI:
             self.matrix_text.delete("1.0", "end")
             self.edge_text.delete("1.0", "end")
             self._show(self.current_image)
-            self.status.set(f"种子 {self.seed.get()}：已随机切割并摆放 4 块碎片")
+            self.status.set(f"种子 {self.seed.get()}：已随机切割并摆放 {count} 块碎片")
         except Exception as exc:
             messagebox.showerror("生成失败", str(exc))
 
@@ -149,7 +156,7 @@ class PuzzleGUI:
         if self.scene is None:
             self.generate()
         try:
-            self.pieces = sim.detect_pieces(self.scene)
+            self.pieces = sim.detect_pieces(self.scene, self.piece_count.get())
             self.current_image = sim.annotate_detection(self.scene, self.pieces)
             self._show(self.current_image)
             vertices = "，".join(f"P{i}: {len(p)} 个顶点" for i, p in enumerate(self.pieces))
@@ -167,7 +174,8 @@ class PuzzleGUI:
             self.current_image = sim.render_solution(self.scene, self.pieces, self.transforms)
             self._show(self.current_image)
             self._write_results()
-            self.status.set("拼接成功：已得到 4 块碎片到目标矩形的旋转平移矩阵")
+            self.status.set(
+                f"拼接成功：已得到 {len(self.pieces)} 块碎片到目标矩形的旋转平移矩阵")
         except Exception as exc:
             messagebox.showerror("拼接失败", str(exc))
 
@@ -235,7 +243,8 @@ class PuzzleGUI:
             return
         test_seed = self.seed.get() + self.batch_index
         try:
-            self.batch_errors.append(sim.run_once(test_seed, Path("output"), save=False))
+            self.batch_errors.append(sim.run_once(
+                test_seed, Path("output"), save=False, piece_count=self.piece_count.get()))
         except Exception:
             self.batch_failures += 1
         self.batch_index += 1
@@ -252,7 +261,8 @@ class PuzzleGUI:
         if not folder:
             return
         try:
-            sim.run_once(self.seed.get(), Path(folder), save=True)
+            sim.run_once(
+                self.seed.get(), Path(folder), save=True, piece_count=self.piece_count.get())
             self.status.set(f"本次结果已导出到：{folder}")
             messagebox.showinfo("导出完成", f"图片与 transforms.json 已保存到：\n{folder}")
         except Exception as exc:
