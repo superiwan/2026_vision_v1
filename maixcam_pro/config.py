@@ -43,6 +43,21 @@ PAPER_STABLE_MAX_CORNER_SHIFT_PX = 8.0
 PAPER_SEARCH_MAX_FRAMES = 12
 PAPER_GUIDE_LANDSCAPE = True
 
+# The competition rig uses a fixed overhead camera and a fixed black work mat.
+# Its corners are expressed as (x / frame_width, y / frame_height), ordered
+# exactly as the portrait canonical plane: bottom-left, top-left, top-right,
+# bottom-right.  Keep the automatic LAB detector first; this is a robust
+# fallback when the mat is visually connected to dark objects outside it.
+PAPER_FIXED_QUAD_RATIOS = (
+    (0.170, 0.979),
+    (0.193, 0.210),
+    (0.793, 0.146),
+    (0.845, 0.983),
+)
+PAPER_FIXED_QUAD_AFTER_ATTEMPTS = 1
+PAPER_FIXED_QUAD_MAX_BORDER_GRAY = 185
+PAPER_FIXED_QUAD_MIN_DARK_BORDER_RATIO = 0.70
+
 # Canonical portrait A4 plane: exactly 2 pixels/mm.
 A4_WARP_WIDTH = 420
 A4_WARP_HEIGHT = 594

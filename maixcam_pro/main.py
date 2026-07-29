@@ -49,6 +49,7 @@ def run():
     view = StepView(config.CAMERA_WIDTH, config.CAMERA_HEIGHT)
     button = ReleaseButton()
     fps = 0.0
+    live_fps = 0.0
     frame_index = 0
     terminal_drawn = False
     time.fps_set_buff_len(10)
@@ -88,9 +89,9 @@ def run():
             workflow.advance(frame)
         if previous_stage == workflow.SOLVE_PUZZLE \
                 and workflow.stage == workflow.COMPLETE:
-            _print_result(workflow, fps)
+            _print_result(workflow, live_fps)
 
-        output = view.render(frame, workflow, fps)
+        output = view.render(frame, workflow, live_fps)
         show_start = time.ticks_us()
         if maix_frame is not None and output is frame:
             screen.show(maix_frame)
@@ -99,6 +100,12 @@ def run():
         show_ms = (time.ticks_us() - show_start) / 1000.0
         total_ms = (time.ticks_us() - cycle_start) / 1000.0
         fps = time.fps()
+        # A4 location and puzzle solving are deliberate one-shot operations.
+        # Keep the UI's FPS readout tied to continuous camera preview instead
+        # of letting one slow capture step make the completed static screen
+        # look as if the camera itself were running at 2 FPS.
+        if previous_stage == workflow.READY:
+            live_fps = fps
 
         terminal_drawn = workflow.stage in workflow.TERMINAL_STAGES
         frame_index += 1

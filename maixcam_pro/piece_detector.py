@@ -459,16 +459,50 @@ class A4PieceDetector:
                 break
         return None if best is None else self._refine_a4_edges(best)
 
+    def _fixed_a4_quad(self):
+        """Return the calibrated work-mat quadrilateral for this camera rig."""
+        ratios = config.PAPER_FIXED_QUAD_RATIOS
+        if not ratios:
+            return None
+        height, width = self.gray.shape
+        quad = np.float32([
+            (x_ratio * width, y_ratio * height)
+            for x_ratio, y_ratio in ratios
+        ])
+        if not cv2.isContourConvex(
+                np.round(quad).astype(np.int32).reshape(-1, 1, 2)):
+            return None
+        border = np.zeros_like(self.gray)
+        thickness = max(2, round(min(self.gray.shape) / 160.0))
+        cv2.polylines(border, [np.round(quad).astype(np.int32)], True,
+                      255, thickness, cv2.LINE_AA)
+        dark_ratio = float(np.mean(
+            self.gray[border > 0] < config.PAPER_FIXED_QUAD_MAX_BORDER_GRAY))
+        if dark_ratio < config.PAPER_FIXED_QUAD_MIN_DARK_BORDER_RATIO:
+            return None
+        return quad
+
     def find_a4_from_preview(self):
         """Confirm one stable LAB/geometry candidate, then cache its warp."""
         start = time.perf_counter()
         quad = self._find_a4_quad()
+        used_fixed_quad = False
         self.paper_generation += 1
         self.paper_search_attempts += 1
         self._clear_analysis()
         self.paper_locked = False
         self.homography = None
         self.inverse_homography = None
+        # In the fixed competition rig, cables, hands, or nearby black objects
+        # can merge with the black mat in a LAB binary image.  Do not keep the
+        # CPU in a slow 12-frame retry loop in that case: use the calibrated
+        # quadrilateral after the initial automatic attempt.
+        if (quad is None
+                and self.paper_search_attempts
+                >= config.PAPER_FIXED_QUAD_AFTER_ATTEMPTS):
+            quad = self._fixed_a4_quad()
+            used_fixed_quad = quad is not None
+
         if quad is None:
             self.paper_quad = None
             self.paper_contour = None
@@ -491,7 +525,9 @@ class A4PieceDetector:
             self.paper_quad = quad
             self.paper_contour = np.round(quad).astype(
                 np.int32).reshape(-1, 1, 2)
-            if self.paper_stable_count >= config.PAPER_STABLE_FRAMES:
+            required_frames = (1 if used_fixed_quad
+                               else config.PAPER_STABLE_FRAMES)
+            if self.paper_stable_count >= required_frames:
                 destination = np.float32((
                     (0, 0),
                     (config.A4_WARP_WIDTH - 1, 0),
