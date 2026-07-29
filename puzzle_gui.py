@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 import puzzle_sim as sim
+from mujoco_sim.sync_bridge import MuJoCoBridge
 
 
 class PuzzleGUI:
@@ -33,9 +34,14 @@ class PuzzleGUI:
         self.photo = None
         self.batch_running = False
         self.animation_job = None
+        self.animation_speed = tk.DoubleVar(value=1.0)
+        self.mujoco = MuJoCoBridge()
+        self.waiting_for_scene = False
 
         self._build_style()
         self._build_layout()
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
+        self.root.after(25, self._poll_mujoco)
         self.generate()
 
     def _build_style(self):
@@ -78,6 +84,18 @@ class PuzzleGUI:
         ttk.Label(count_row, text="碎片数量（1～4）").pack(side="left")
         ttk.Spinbox(count_row, from_=1, to=4, textvariable=self.piece_count,
                     width=12, state="readonly").pack(side="right")
+        speed_row = ttk.Frame(controls)
+        speed_row.pack(fill="x", pady=(0, 9))
+        ttk.Label(speed_row, text="同步动画速度").pack(side="left")
+        self.speed_label = ttk.Label(speed_row, text="1.00×", width=7)
+        self.speed_label.pack(side="right")
+        self.speed_scale = ttk.Scale(
+            speed_row, from_=.25, to=4.0, variable=self.animation_speed,
+            command=self._speed_changed)
+        self.speed_scale.pack(
+            side="right", fill="x", expand=True, padx=(12, 8))
+        self.root.after(0, lambda: (
+            self.animation_speed.set(1.0), self._speed_changed()))
 
         buttons = ttk.Frame(controls)
         buttons.pack(fill="x")
@@ -144,19 +162,20 @@ class PuzzleGUI:
                 self.root.after_cancel(self.animation_job)
                 self.animation_job = None
             count = self.piece_count.get()
-            self.scene = sim.generate_camera_frame(self.seed.get(), count)
+            self.scene = None
             self.pieces = self.transforms = self.matches = None
-            self.current_image = self.scene
             self.matrix_text.delete("1.0", "end")
             self.edge_text.delete("1.0", "end")
-            self._show(self.current_image)
-            self.status.set(f"种子 {self.seed.get()}：已随机切割并摆放 {count} 块碎片")
+            self.waiting_for_scene = True
+            self.status.set("正在同步生成视觉场景并打开独立 MuJoCo 窗口…")
+            self.mujoco.send("generate", self.seed.get(), count)
         except Exception as exc:
             messagebox.showerror("生成失败", str(exc))
 
     def detect(self):
         if self.scene is None:
-            self.generate()
+            messagebox.showinfo("场景生成中", "请等待 MuJoCo 场景生成完成")
+            return
         try:
             # Detection receives only camera pixels; the generator's polygons,
             # adjacency and true transforms are not retained by the GUI.
@@ -165,6 +184,7 @@ class PuzzleGUI:
             self._show(self.current_image)
             vertices = "，".join(f"P{i}: {len(p)} 个顶点" for i, p in enumerate(self.pieces))
             self.status.set(f"识别成功：{len(self.pieces)} 块碎片；{vertices}")
+            self.mujoco.send("detect")
         except Exception as exc:
             messagebox.showerror("识别失败", str(exc))
 
@@ -176,7 +196,8 @@ class PuzzleGUI:
         try:
             self.transforms, self.matches = sim.solve(self.pieces)
             self._write_results()
-            self._start_motion_animation()
+            self.status.set("视觉规划完成，正在同步启动 PIPER-L 拼接…")
+            self.mujoco.send("stitch")
         except Exception as exc:
             messagebox.showerror("拼接失败", str(exc))
 
@@ -186,6 +207,86 @@ class PuzzleGUI:
         self.animation_frame = 0
         self.animation_frames_per_piece = 36
         self._animation_step()
+
+    def _render_motion_state(self, piece_index, translation_t, rotation_t=None):
+        """Render the exact MuJoCo-reported piece progress in the 2-D view."""
+        if rotation_t is None:
+            rotation_t = translation_t
+        frame = sim.render_scene([])
+        colors = [(70, 100, 230), (70, 190, 80), (220, 120, 60), (170, 70, 190)]
+        for i, piece in enumerate(self.pieces):
+            if i < piece_index:
+                shown, color = sim.apply_h(piece, self.transforms[i]), colors[i]
+            elif i == piece_index:
+                h = self.transforms[i]
+                angle = math.atan2(h[1, 0], h[0, 0])
+                src_center = piece.mean(axis=0)
+                dst_center = sim.apply_h(src_center[None], h)[0]
+                move_t = translation_t * translation_t * (
+                    3.0 - 2.0 * translation_t)
+                rotate_t = rotation_t * rotation_t * (
+                    3.0 - 2.0 * rotation_t)
+                center = src_center * (1.0 - move_t) + dst_center * move_t
+                local = piece - src_center
+                c, s = math.cos(angle * rotate_t), math.sin(angle * rotate_t)
+                shown = local @ np.array([[c, -s], [s, c]]).T + center
+                color = (0, 180, 255)
+            else:
+                shown, color = piece, sim.PIECE_BGR
+            pts = np.round(shown).astype(np.int32)
+            cv2.fillPoly(frame, [pts], color)
+            cv2.polylines(frame, [pts], True, (25, 25, 25), 2, cv2.LINE_AA)
+            center = np.round(shown.mean(axis=0)).astype(int)
+            cv2.putText(frame, f"P{i}", tuple(center), cv2.FONT_HERSHEY_SIMPLEX,
+                        .65, (255, 255, 255), 2, cv2.LINE_AA)
+        self.current_image = frame
+        self._show(frame)
+
+    def _speed_changed(self, _=None):
+        value = float(self.animation_speed.get())
+        self.speed_label.configure(text=f"{value:.2f}×")
+        self.mujoco.set_speed(value)
+
+    def _poll_mujoco(self):
+        try:
+            for event in self.mujoco.poll():
+                if event[0] == "generated":
+                    self.waiting_for_scene = False
+                    self.scene = event[1]
+                    self.current_image = self.scene
+                    self._show(self.scene)
+                    self.status.set(
+                        f"种子 {self.seed.get()}：视觉页面与 MuJoCo 已同步生成 "
+                        f"{self.piece_count.get()} 块碎片")
+                elif event[0] == "detected":
+                    self.status.set(
+                        f"视觉识别已同步到 MuJoCo：检测到 {event[1]} 块碎片")
+                elif event[0] == "stage":
+                    if event[1] < 0:
+                        self.status.set(f"MuJoCo：{event[2]}")
+                    else:
+                        self.status.set(
+                            f"MuJoCo 实时拼接 P{event[1]}：{event[2]}")
+                elif event[0] == "motion" and self.transforms is not None:
+                    self._render_motion_state(event[1], event[2])
+                elif event[0] == "motion_pose" and self.transforms is not None:
+                    self._render_motion_state(
+                        event[1], event[2], event[3])
+                elif event[0] == "done":
+                    self.current_image = sim.render_solution(
+                        self.scene, self.pieces, self.transforms)
+                    self._show(self.current_image)
+                    self.status.set(
+                        "双窗口同步拼接完成：目标矩形 10 cm × 6 cm")
+                elif event[0] == "error":
+                    messagebox.showerror("MuJoCo 仿真错误", event[1])
+                    self.status.set("MuJoCo 仿真失败：" + event[1])
+        finally:
+            self.root.after(25, self._poll_mujoco)
+
+    def _close(self):
+        self.mujoco.close()
+        self.root.destroy()
 
     def _animation_step(self):
         count = len(self.pieces)
