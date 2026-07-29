@@ -18,6 +18,13 @@
 
 ## 演示
 
+### 逐块实时运动与拼接
+
+![碎片依次旋转平移到目标矩形的实时动画](docs/media/demo-motion-animation.gif)
+
+动画展示视觉识别完成后，P0、P1、P2、P3 依次按照求解出的旋转和平移矩阵，
+运动到 10 cm × 6 cm 目标矩形并完成拼接。GIF 会在 GitHub 页面自动循环播放。
+
 ### 4 块碎片
 
 ![4 块碎片识别与还原演示](docs/media/demo-4-pieces.gif)
