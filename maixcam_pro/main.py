@@ -1,96 +1,110 @@
-"""MaixCAM Pro entry: camera -> pieces -> geometry solver -> screen overlay."""
+"""MaixCAM Pro one-button puzzle vision entry."""
 
-import cv2
-import numpy as np
-from maix import app, camera, display, image
+from maix import app, camera, display, image, time, touchscreen
 
-import config
-from piece_detector import detect_pieces
-from puzzle_solver import apply_h, motion_commands, solve
-
-
-def draw_polygon(frame, polygon, color, thickness=2):
-    points = polygon.round().astype("int32")
-    cv2.polylines(frame, [points], True, color, thickness, cv2.LINE_AA)
+try:
+    from . import config
+    from .step_view import ReleaseButton, StepView
+    from .workflow import PuzzleWorkflow
+except ImportError:  # MaixVision runs this directory as the project root.
+    import config
+    from step_view import ReleaseButton, StepView
+    from workflow import PuzzleWorkflow
 
 
-def draw_result(frame, pieces, paper, transforms, commands, fill_ratio):
-    cv2.drawContours(frame, [paper], -1, config.PAPER_COLOR, 2, cv2.LINE_AA)
-    target_points = []
-    for index, (piece, transform) in enumerate(zip(pieces, transforms)):
-        color = config.PIECE_COLORS[index % len(config.PIECE_COLORS)]
-        draw_polygon(frame, piece, color, 2)
-        center = piece.mean(axis=0).round().astype(int)
-        cv2.putText(frame, "P%d" % index, tuple(center),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
-
-        target = apply_h(piece, transform)
-        target_points.append(target)
-        draw_polygon(frame, target, config.TARGET_COLOR, 2)
-
-    all_target = np.vstack(target_points).astype("float32")
-    rectangle = cv2.boxPoints(cv2.minAreaRect(all_target)).round().astype("int32")
-    cv2.polylines(frame, [rectangle], True, config.TARGET_COLOR, 3, cv2.LINE_AA)
-
-    y = 20
-    for command in commands:
-        text = "P%d R%+.1f deg D(%+.0f,%+.0f) L%.0f px" % (
+def _print_result(workflow, fps):
+    print("SOLVED ALG %d | %.1f%% | FPS %.1f | pipeline %.2f ms | "
+          "solve %.2f ms" % (
+        workflow.algorithm,
+        workflow.fill_ratio * 100.0,
+        fps,
+        workflow.elapsed_ms,
+        workflow.solve_ms,
+    ))
+    for command in workflow.commands:
+        print("P%d: R%+.2f deg, dx=%+.2f, dy=%+.2f, d=%.2f px" % (
             command["piece"], command["rotation_deg"], command["dx"],
-            command["dy"], command["distance"])
-        cv2.putText(frame, text, (8, y), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.42, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(frame, text, (8, y), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.42, (0, 0, 0), 1, cv2.LINE_AA)
-        y += 18
-    cv2.putText(frame, "rect %.1f%%" % (fill_ratio * 100.0),
-                (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
-                config.TARGET_COLOR, 1, cv2.LINE_AA)
+            command["dy"], command["distance"]))
 
 
 def run():
-    cam = camera.Camera(config.CAMERA_WIDTH, config.CAMERA_HEIGHT,
-                        image.Format.FMT_BGR888)
     screen = display.Display()
+    screen_size = (screen.width(), screen.height())
+    expected_size = (config.CAMERA_WIDTH, config.CAMERA_HEIGHT)
+    if screen_size != expected_size:
+        print("WARNING: expected MaixCAM Pro display %s, got %s" % (
+            expected_size, screen_size))
+
+    cam = camera.Camera(
+        config.CAMERA_WIDTH,
+        config.CAMERA_HEIGHT,
+        image.Format.FMT_BGR888,
+        fps=config.CAMERA_FPS,
+        buff_num=config.CAMERA_BUFFERS,
+    )
+    touch = touchscreen.TouchScreen()
     cam.skip_frames(config.CAMERA_SKIP_FRAMES)
 
-    cached = None
-    last_message = None
+    workflow = PuzzleWorkflow()
+    view = StepView(config.CAMERA_WIDTH, config.CAMERA_HEIGHT)
+    button = ReleaseButton()
+    fps = 0.0
     frame_index = 0
+    terminal_drawn = False
+    time.fps_set_buff_len(10)
+    time.fps_start()
+
     while not app.need_exit():
-        maix_frame = cam.read()
-        # FMT_BGR888 allows OpenCV to borrow the camera buffer without a copy.
-        frame = image.image2cv(maix_frame, ensure_bgr=False, copy=False)
+        started_now = False
+        if workflow.stage in workflow.TERMINAL_STAGES and terminal_drawn:
+            if button.read(touch, view.action_rect):
+                if workflow.stage == workflow.COMPLETE:
+                    workflow.reset()
+                else:
+                    workflow.start()
+                    started_now = True
+                terminal_drawn = False
+                cam.clear_buff()
+                time.fps_start()
+            else:
+                time.sleep_ms(12)
+                continue
 
-        if frame_index % config.SOLVE_EVERY_N_FRAMES == 0:
-            try:
-                pieces, paper, _ = detect_pieces(frame)
-                transforms, matches, fill_ratio = solve(pieces, paper)
-                commands = motion_commands(pieces, transforms)
-                cached = (pieces, paper, transforms, commands, fill_ratio)
-                message = "; ".join(
-                    "P%d: R%+.1f, dx=%+.1f, dy=%+.1f, d=%.1fpx" % (
-                        c["piece"], c["rotation_deg"], c["dx"],
-                        c["dy"], c["distance"])
-                    for c in commands)
-                if message != last_message:
-                    print(message)
-                    last_message = message
-            except Exception as error:
-                cached = None
-                message = "ERROR: %s" % error
-                if message != last_message:
-                    print(message)
-                last_message = message
+        cycle_start = time.ticks_us()
+        maix_frame = None
+        frame = None
+        if workflow.stage != workflow.SOLVE_PUZZLE:
+            maix_frame = cam.read()
+            frame = image.image2cv(
+                maix_frame, ensure_bgr=False, copy=False)
 
-        if cached is not None:
-            draw_result(frame, *cached)
-        elif last_message:
-            cv2.putText(frame, "ERROR: see MaixVision terminal", (8, 24),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45,
-                        config.ERROR_COLOR, 2, cv2.LINE_AA)
+        if workflow.stage == workflow.READY:
+            if button.read(touch, view.action_rect):
+                workflow.start()
+                started_now = True
 
-        screen.show(maix_frame)
+        previous_stage = workflow.stage
+        if workflow.stage in workflow.ACTIVE_STAGES and not started_now:
+            workflow.advance(frame)
+        if previous_stage == workflow.SOLVE_PUZZLE \
+                and workflow.stage == workflow.COMPLETE:
+            _print_result(workflow, fps)
+
+        output = view.render(frame, workflow, fps)
+        show_start = time.ticks_us()
+        if maix_frame is not None and output is frame:
+            screen.show(maix_frame)
+        else:
+            screen.show(image.cv2image(output, bgr=True, copy=False))
+        show_ms = (time.ticks_us() - show_start) / 1000.0
+        total_ms = (time.ticks_us() - cycle_start) / 1000.0
+        fps = time.fps()
+
+        terminal_drawn = workflow.stage in workflow.TERMINAL_STAGES
         frame_index += 1
+        if frame_index % config.PRINT_TIMING_EVERY_N_FRAMES == 0:
+            print("FPS %.1f | frame %.2f ms | show %.2f ms | stage %s" % (
+                fps, total_ms, show_ms, workflow.stage))
 
 
 if __name__ == "__main__":
