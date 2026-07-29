@@ -1,0 +1,45 @@
+"""MaixCAM Pro 拼图视觉参数。现场主要调整阈值和面积比例。"""
+
+# Camera / display
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 480
+CAMERA_SKIP_FRAMES = 20
+SOLVE_EVERY_N_FRAMES = 5
+
+# Black A4 detection
+PAPER_GRAY_MAX = 100
+PAPER_MIN_AREA_RATIO = 0.25
+PAPER_CLOSE_KERNEL = 7
+PAPER_APPROX_EPSILON = 0.02
+PAPER_MASK_INSET = 4
+
+# Non-black piece segmentation inside the A4 contour
+PIECE_GRAY_MIN = 65
+PIECE_BACKGROUND_DELTA = 35
+PIECE_MIN_AREA_RATIO = 0.003
+PIECE_MAX_AREA_RATIO = 0.45
+PIECE_APPROX_EPSILONS = (0.008, 0.012, 0.016, 0.020, 0.026, 0.034, 0.045)
+MORPH_KERNEL = 3
+THIN_OBJECT_ASPECT_RATIO = 14.0
+
+# Edge matching / assembly. 0.12 is retained from the original project.
+EDGE_LENGTH_TOLERANCE = 0.12
+MAX_EDGE_CANDIDATES = 40
+MIN_RECTANGLE_FILL = 0.90
+
+# Recovered rectangle position, relative to the black A4 bounding box.
+TARGET_CENTER_X_RATIO = 0.50
+TARGET_CENTER_Y_RATIO = 0.76
+TARGET_MARGIN_RATIO = 0.03
+
+# Overlay colours (BGR)
+PAPER_COLOR = (255, 180, 0)
+PIECE_COLORS = (
+    (0, 220, 255),
+    (80, 220, 80),
+    (255, 140, 60),
+    (220, 80, 220),
+)
+TARGET_COLOR = (0, 255, 0)
+ERROR_COLOR = (0, 0, 255)
+
