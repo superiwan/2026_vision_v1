@@ -49,7 +49,8 @@ class PuzzleGUI:
         header = ttk.Frame(self.root, padding=(16, 12))
         header.pack(fill="x")
         ttk.Label(header, text="E题拼图装置 · 视觉算法仿真", style="Title.TLabel").pack(side="left")
-        ttk.Label(header, text="纯色碎片 / 俯视相机 / 像素坐标", foreground="#666").pack(
+        ttk.Label(header, text="目标矩形 10 cm × 6 cm / 俯视相机 / 像素坐标",
+                  foreground="#666").pack(
             side="right", pady=(7, 0))
 
         body = ttk.Panedwindow(self.root, orient="horizontal")

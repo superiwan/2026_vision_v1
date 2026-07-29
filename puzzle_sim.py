@@ -15,7 +15,11 @@ import numpy as np
 
 CANVAS_W, CANVAS_H = 900, 1200
 DIVIDER_Y = 575
-CARD_W, CARD_H = 420.0, 280.0
+PIXELS_PER_CM = 40.0
+CARD_WIDTH_CM, CARD_HEIGHT_CM = 10.0, 6.0
+CARD_W = CARD_WIDTH_CM * PIXELS_PER_CM
+CARD_H = CARD_HEIGHT_CM * PIXELS_PER_CM
+TARGET_Y = 790
 PIECE_BGR = (190, 95, 30)
 PAPER_BGR = (238, 238, 238)
 
@@ -111,9 +115,11 @@ def render_scene(placed: list[np.ndarray]) -> np.ndarray:
     image = np.full((CANVAS_H, CANVAS_W, 3), PAPER_BGR, np.uint8)
     cv2.line(image, (0, DIVIDER_Y), (CANVAS_W, DIVIDER_Y), (35, 35, 35), 4)
     target_x = int((CANVAS_W - CARD_W) / 2)
-    target_y = 770
+    target_y = TARGET_Y
     cv2.rectangle(image, (target_x, target_y),
                   (int(target_x + CARD_W), int(target_y + CARD_H)), (100, 100, 100), 2)
+    cv2.putText(image, "Target: 10 cm x 6 cm", (target_x, target_y - 12),
+                cv2.FONT_HERSHEY_SIMPLEX, .65, (80, 80, 80), 2, cv2.LINE_AA)
     for poly in placed:
         pts = np.round(poly).astype(np.int32)
         cv2.fillPoly(image, [pts], PIECE_BGR, lineType=cv2.LINE_8)
@@ -285,7 +291,7 @@ def solve(pieces: list[np.ndarray]):
         normalize = rigid(math.radians(90) - math.radians(angle), 0, 0)
         rotated = apply_h(allp, normalize)
         mn, mx = rotated.min(0), rotated.max(0)
-    target_origin = np.array([(CANVAS_W - CARD_W) / 2, 770.0])
+    target_origin = np.array([(CANVAS_W - CARD_W) / 2, float(TARGET_Y)])
     translate = rigid(0, *(target_origin - mn))
     final = [translate @ normalize @ h for h in transforms]
     return final, matches
@@ -370,7 +376,17 @@ def run_once(seed: int, output: Path, save=True, piece_count: int = 4):
             "seed": seed,
             "piece_count": piece_count,
             "coordinate_system": "image pixels: x right, y down",
-            "target_rectangle_px": {"x": 240, "y": 770, "width": CARD_W, "height": CARD_H},
+            "scale_px_per_cm": PIXELS_PER_CM,
+            "target_rectangle_cm": {
+                "width": CARD_WIDTH_CM,
+                "height": CARD_HEIGHT_CM,
+            },
+            "target_rectangle_px": {
+                "x": (CANVAS_W - CARD_W) / 2,
+                "y": TARGET_Y,
+                "width": CARD_W,
+                "height": CARD_H,
+            },
             "matched_cut_edges": [[int(i), int(ei), int(j), int(ej)]
                                   for _, i, ei, j, ej in matches],
             "dimension_error_px": round(float(dimension_error), 4),
