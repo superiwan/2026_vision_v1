@@ -170,6 +170,51 @@ def align_edge(src_a, src_b, dst_a, dst_b) -> np.ndarray:
     return r
 
 
+def optimize_pose_graph(pieces, matches, initial):
+    """Globally distribute closed-loop edge error over all movable pieces."""
+    if len(pieces) < 3:
+        return initial
+
+    def pack(poses):
+        values = []
+        for h in poses[1:]:
+            values.extend([math.atan2(h[1, 0], h[0, 0]), h[0, 2], h[1, 2]])
+        return np.asarray(values, dtype=float)
+
+    def unpack(x):
+        poses = [initial[0]]
+        for k in range(len(pieces) - 1):
+            theta, tx, ty = x[3 * k:3 * k + 3]
+            poses.append(rigid(theta, tx, ty))
+        return poses
+
+    def residual(x):
+        poses = unpack(x)
+        values = []
+        for _, i, ei, j, ej in matches:
+            ia, ib = edges(pieces[i])[ei]
+            ja, jb = edges(pieces[j])[ej]
+            wi = apply_h(np.array([ia, ib]), poses[i])
+            wj = apply_h(np.array([jb, ja]), poses[j])
+            values.extend((wi - wj).ravel())
+        return np.asarray(values)
+
+    x = pack(initial)
+    for _ in range(20):
+        r0 = residual(x)
+        jac = np.empty((len(r0), len(x)))
+        for k in range(len(x)):
+            step = 1e-5 if k % 3 == 0 else 1e-3
+            shifted = x.copy()
+            shifted[k] += step
+            jac[:, k] = (residual(shifted) - r0) / step
+        delta, *_ = np.linalg.lstsq(jac, -r0, rcond=None)
+        x += delta
+        if np.linalg.norm(delta) < 1e-7:
+            break
+    return unpack(x)
+
+
 def candidate_matchings(pieces: list[np.ndarray]):
     all_edges = {(i, e): edge for i, p in enumerate(pieces) for e, edge in enumerate(edges(p))}
     candidates = []
@@ -278,6 +323,10 @@ def solve(pieces: list[np.ndarray]):
     if best is None:
         raise RuntimeError("未找到满足边长配对与碎片邻接关系的拼接")
     _, transforms, assembled, matches = best
+    # Candidate search uses the inexpensive propagated poses. Only the winning
+    # topology receives global nonlinear refinement.
+    transforms = optimize_pose_graph(pieces, matches, transforms)
+    assembled = [apply_h(p, h) for p, h in zip(pieces, transforms)]
 
     # Normalize recovered rectangle to the requested lower-half target.
     allp = np.vstack(assembled).astype(np.float32)

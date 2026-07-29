@@ -32,6 +32,7 @@ class PuzzleGUI:
         self.current_image = None
         self.photo = None
         self.batch_running = False
+        self.animation_job = None
 
         self._build_style()
         self._build_layout()
@@ -139,6 +140,9 @@ class PuzzleGUI:
 
     def generate(self):
         try:
+            if self.animation_job is not None:
+                self.root.after_cancel(self.animation_job)
+                self.animation_job = None
             rng = np.random.default_rng(self.seed.get())
             count = self.piece_count.get()
             source = sim.random_cut(rng, count)
@@ -172,13 +176,69 @@ class PuzzleGUI:
             return
         try:
             self.transforms, self.matches = sim.solve(self.pieces)
-            self.current_image = sim.render_solution(self.scene, self.pieces, self.transforms)
-            self._show(self.current_image)
             self._write_results()
-            self.status.set(
-                f"拼接成功：已得到 {len(self.pieces)} 块碎片到目标矩形的旋转平移矩阵")
+            self._start_motion_animation()
         except Exception as exc:
             messagebox.showerror("拼接失败", str(exc))
+
+    def _start_motion_animation(self):
+        """Move pieces one by one using their solved SE(2) transforms."""
+        self.animation_piece = 0
+        self.animation_frame = 0
+        self.animation_frames_per_piece = 36
+        self._animation_step()
+
+    def _animation_step(self):
+        count = len(self.pieces)
+        if self.animation_piece >= count:
+            self.animation_job = None
+            self.current_image = sim.render_solution(
+                self.scene, self.pieces, self.transforms)
+            self._show(self.current_image)
+            self.status.set(
+                f"拼接动画完成：{count} 块碎片已依次移动到 10 cm × 6 cm 目标矩形")
+            return
+
+        t = self.animation_frame / self.animation_frames_per_piece
+        # Smooth acceleration/deceleration instead of a visually abrupt linear move.
+        t = t * t * (3.0 - 2.0 * t)
+        frame = sim.render_scene([])
+        colors = [(70, 100, 230), (70, 190, 80), (220, 120, 60), (170, 70, 190)]
+        for i, piece in enumerate(self.pieces):
+            if i < self.animation_piece:
+                shown = sim.apply_h(piece, self.transforms[i])
+                color = colors[i]
+            elif i == self.animation_piece:
+                h = self.transforms[i]
+                angle = math.atan2(h[1, 0], h[0, 0])
+                src_center = piece.mean(axis=0)
+                dst_center = sim.apply_h(src_center[None], h)[0]
+                center = src_center * (1.0 - t) + dst_center * t
+                local = piece - src_center
+                c, s = math.cos(angle * t), math.sin(angle * t)
+                rot = np.array([[c, -s], [s, c]])
+                shown = local @ rot.T + center
+                color = (0, 180, 255)
+            else:
+                shown = piece
+                color = sim.PIECE_BGR
+            pts = np.round(shown).astype(np.int32)
+            cv2.fillPoly(frame, [pts], color)
+            cv2.polylines(frame, [pts], True, (25, 25, 25), 2, cv2.LINE_AA)
+            center = np.round(shown.mean(axis=0)).astype(int)
+            cv2.putText(frame, f"P{i}", tuple(center), cv2.FONT_HERSHEY_SIMPLEX,
+                        .65, (255, 255, 255), 2, cv2.LINE_AA)
+
+        self.current_image = frame
+        self._show(frame)
+        self.status.set(
+            f"实时拼接：正在移动 P{self.animation_piece} "
+            f"({self.animation_frame}/{self.animation_frames_per_piece})")
+        self.animation_frame += 1
+        if self.animation_frame > self.animation_frames_per_piece:
+            self.animation_piece += 1
+            self.animation_frame = 0
+        self.animation_job = self.root.after(25, self._animation_step)
 
     def _write_results(self):
         self.matrix_text.delete("1.0", "end")
