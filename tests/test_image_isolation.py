@@ -24,6 +24,19 @@ class ImageIsolationTest(unittest.TestCase):
                 pieces, transforms, _matches = analyze_camera_frame(reloaded)
                 self.assertEqual(len(pieces), piece_count)
                 self.assertEqual(len(transforms), piece_count)
+
+    def test_joker_texture_is_detected_from_pixels_only(self):
+        for piece_count in range(1, 5):
+            with self.subTest(piece_count=piece_count):
+                image = generate_camera_frame(
+                    seed=200 + piece_count,
+                    piece_count=piece_count,
+                    material_mode="joker")
+                reloaded = cv2.imdecode(
+                    cv2.imencode(".png", image)[1], cv2.IMREAD_COLOR)
+                pieces, transforms, _matches = analyze_camera_frame(reloaded)
+                self.assertEqual(len(pieces), piece_count)
+                self.assertEqual(len(transforms), piece_count)
                 for transform in transforms:
                     # Each planned pose remains a proper rigid transform.
                     self.assertAlmostEqual(

@@ -22,6 +22,7 @@ CARD_H = CARD_HEIGHT_CM * PIXELS_PER_CM
 TARGET_Y = 790
 PIECE_BGR = (190, 95, 30)
 PAPER_BGR = (238, 238, 238)
+CARD_ASSET = Path(__file__).resolve().parent / "mujoco_sim/assets/cards/big_joker.png"
 
 
 def random_cut(rng: np.random.Generator, piece_count: int = 4) -> list[np.ndarray]:
@@ -77,13 +78,15 @@ def apply_h(points: np.ndarray, h: np.ndarray) -> np.ndarray:
 
 
 def place_randomly(polys: list[np.ndarray], rng: np.random.Generator):
-    placed = []
+    placed = [None] * len(polys)
     occupancy = np.zeros((DIVIDER_Y - 25, CANVAS_W), np.uint8)
     # Place large pieces first so that 3-piece layouts do not trap the largest
     # sector in the remaining narrow gaps.
-    ordered = sorted(polys, key=lambda p: abs(cv2.contourArea(p.astype(np.float32))),
+    ordered = sorted(range(len(polys)),
+                     key=lambda i: abs(cv2.contourArea(polys[i].astype(np.float32))),
                      reverse=True)
-    for poly in ordered:
+    for index in ordered:
+        poly = polys[index]
         centroid = poly.mean(axis=0)
         local = poly - centroid
         accepted = False
@@ -100,7 +103,7 @@ def place_randomly(polys: list[np.ndarray], rng: np.random.Generator):
             dilated = cv2.dilate(mask, np.ones((19, 19), np.uint8))
             if not np.any((dilated > 0) & (occupancy > 0)):
                 cv2.fillPoly(occupancy, [np.round(scene_poly).astype(np.int32)], 255)
-                placed.append(scene_poly)
+                placed[index] = scene_poly
                 accepted = True
                 break
         if not accepted:
@@ -108,7 +111,16 @@ def place_randomly(polys: list[np.ndarray], rng: np.random.Generator):
     return placed
 
 
-def render_scene(placed: list[np.ndarray]) -> np.ndarray:
+def _joker_card() -> np.ndarray:
+    card = cv2.imread(str(CARD_ASSET), cv2.IMREAD_COLOR)
+    if card is None:
+        raise RuntimeError(f"无法读取大鬼扑克牌素材：{CARD_ASSET}")
+    return cv2.resize(card, (int(CARD_W), int(CARD_H)),
+                      interpolation=cv2.INTER_AREA)
+
+
+def render_scene(placed: list[np.ndarray], source: list[np.ndarray] | None = None,
+                 material_mode: str = "color") -> np.ndarray:
     image = np.full((CANVAS_H, CANVAS_W, 3), PAPER_BGR, np.uint8)
     cv2.line(image, (0, DIVIDER_Y), (CANVAS_W, DIVIDER_Y), (35, 35, 35), 4)
     target_x = int((CANVAS_W - CARD_W) / 2)
@@ -117,21 +129,35 @@ def render_scene(placed: list[np.ndarray]) -> np.ndarray:
                   (int(target_x + CARD_W), int(target_y + CARD_H)), (100, 100, 100), 2)
     cv2.putText(image, "Target: 10 cm x 6 cm", (target_x, target_y - 12),
                 cv2.FONT_HERSHEY_SIMPLEX, .65, (80, 80, 80), 2, cv2.LINE_AA)
-    for poly in placed:
+    joker = _joker_card() if material_mode == "joker" else None
+    for index, poly in enumerate(placed):
         pts = np.round(poly).astype(np.int32)
-        cv2.fillPoly(image, [pts], PIECE_BGR, lineType=cv2.LINE_8)
+        if joker is None or source is None:
+            cv2.fillPoly(image, [pts], PIECE_BGR, lineType=cv2.LINE_8)
+        else:
+            src = source[index].astype(np.float32)
+            dst = poly.astype(np.float32)
+            transform = cv2.getAffineTransform(src[:3], dst[:3])
+            warped = cv2.warpAffine(
+                joker, transform, (CANVAS_W, CANVAS_H),
+                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+            mask = np.zeros((CANVAS_H, CANVAS_W), np.uint8)
+            cv2.fillPoly(mask, [pts], 255)
+            image[mask > 0] = warped[mask > 0]
         # Use a darker color of the same hue so the visual border remains part
         # of the segmented foreground instead of clipping polygon corners.
         cv2.polylines(image, [pts], True, (105, 52, 16), 2, cv2.LINE_AA)
     return image
 
 
-def generate_camera_frame(seed: int, piece_count: int) -> np.ndarray:
+def generate_camera_frame(seed: int, piece_count: int,
+                          material_mode: str = "color") -> np.ndarray:
     """Generation boundary: return pixels only, never geometry or true poses."""
     rng = np.random.default_rng(seed)
     source_polygons = random_cut(rng, piece_count)
     placed_polygons = place_randomly(source_polygons, rng)
-    rendered = render_scene(placed_polygons)
+    rendered = render_scene(
+        placed_polygons, source_polygons, material_mode=material_mode)
 
     # Simulate a camera/file boundary. Geometry variables stay local to this
     # function and the vision stage receives only decoded image pixels.
@@ -151,8 +177,17 @@ def order_clockwise(vertices: np.ndarray) -> np.ndarray:
 
 
 def detect_pieces(image: np.ndarray, expected_count: int | None = None) -> list[np.ndarray]:
-    hsv = cv2.cvtColor(image[:DIVIDER_Y], cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, (5, 80, 40), (140, 255, 245))
+    roi = image[:DIVIDER_Y]
+    # Geometry-only foreground extraction: estimate the A4 background from
+    # border pixels and segment by colour distance. This works for both the
+    # solid teaching card and a fully illustrated Joker card.
+    # The paper is the dominant surface. Using the whole ROI is more robust
+    # than sampling its border because the MuJoCo camera also sees a narrow
+    # grey table strip outside the A4 sheet.
+    background = np.median(roi.reshape(-1, 3).astype(np.float32), axis=0)
+    distance = np.linalg.norm(roi.astype(np.float32) - background, axis=2)
+    mask = np.where(distance > 5.0, 255, 0).astype(np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     pieces = []
@@ -385,12 +420,21 @@ def annotate_detection(image, pieces):
     return out
 
 
-def render_solution(image, pieces, transforms):
+def render_solution(image, pieces, transforms, preserve_texture=False):
     out = image.copy()
     colors = [(70, 100, 230), (70, 190, 80), (220, 120, 60), (170, 70, 190)]
     for i, (p, h) in enumerate(zip(pieces, transforms)):
         q = np.round(apply_h(p, h)).astype(np.int32)
-        cv2.fillPoly(out, [q], colors[i])
+        if preserve_texture:
+            source_mask = np.zeros(image.shape[:2], np.uint8)
+            cv2.fillPoly(source_mask, [np.round(p).astype(np.int32)], 255)
+            warped_image = cv2.warpPerspective(
+                image, h, (image.shape[1], image.shape[0]))
+            warped_mask = cv2.warpPerspective(
+                source_mask, h, (image.shape[1], image.shape[0]))
+            out[warped_mask > 127] = warped_image[warped_mask > 127]
+        else:
+            cv2.fillPoly(out, [q], colors[i])
         cv2.polylines(out, [q], True, (20, 20, 20), 2, cv2.LINE_AA)
         c = np.round(q.mean(0)).astype(int)
         cv2.putText(out, f"P{i}", tuple(c), cv2.FONT_HERSHEY_SIMPLEX, .7,

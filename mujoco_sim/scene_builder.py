@@ -57,6 +57,11 @@ def _mesh_vertices(polygon: np.ndarray, thickness: float = 0.002) -> np.ndarray:
         + [(x, y, half) for x, y in local], dtype=float)
 
 
+def _mesh_texcoords(polygon: np.ndarray, vertices: np.ndarray) -> np.ndarray:
+    card_xy = vertices[:, :2] / PIXEL_TO_METER + polygon.mean(axis=0)
+    return np.c_[card_xy[:, 0] / 400.0, 1.0 - card_xy[:, 1] / 240.0]
+
+
 def _mesh_xml(name: str, polygon: np.ndarray, thickness: float = 0.002) -> str:
     """Create a fixed-topology closed mesh that can be updated in place."""
     vertices = _mesh_vertices(polygon, thickness)
@@ -69,8 +74,13 @@ def _mesh_xml(name: str, polygon: np.ndarray, thickness: float = 0.002) -> str:
         j = (i + 1) % n
         faces.extend([(i, j, n + j), (i, n + j, n + i)])
     vertex_text = " ".join(f"{v:.7f}" for xyz in vertices for v in xyz)
+    # Preserve the original uncut card coordinates as UVs, so all independently
+    # moving meshes still show their correct portion of one complete Joker.
+    texcoords = _mesh_texcoords(polygon, vertices)
+    texcoord_text = " ".join(f"{v:.7f}" for uv in texcoords for v in uv)
     face_text = " ".join(str(v) for face in faces for v in face)
-    return f'<mesh name="{name}" vertex="{vertex_text}" face="{face_text}"/>'
+    return (f'<mesh name="{name}" vertex="{vertex_text}" '
+            f'texcoord="{texcoord_text}" face="{face_text}"/>')
 
 
 def _sample_placements(polygons, rng: np.random.Generator):
@@ -128,7 +138,8 @@ def generate_scene_geometry(seed: int, piece_count: int):
     return polygons, _sample_placements(polygons, rng)
 
 
-def refresh_piece_geometry(model, data, seed: int, piece_count: int):
+def refresh_piece_geometry(model, data, seed: int, piece_count: int,
+                           material_mode: str = "color"):
     """Refresh fixed piece slots without recompiling or replacing the viewer."""
     import mujoco
 
@@ -150,10 +161,17 @@ def refresh_piece_geometry(model, data, seed: int, piece_count: int):
             # MuJoCo stores mesh vertices in its principal-axis frame.
             model.mesh_vert[vertex_address:vertex_address + 10] = (
                 vertices - model.mesh_pos[mesh_id]) @ rotation
+            texcoord_address = model.mesh_texcoordadr[mesh_id]
+            if texcoord_address >= 0:
+                model.mesh_texcoord[texcoord_address:texcoord_address + 10] = (
+                    _mesh_texcoords(polygon, vertices))
             data.qpos[qpos_address:qpos_address + 7] = [
                 x, y, PIECE_Z,
                 math.cos(angle / 2), 0, 0, math.sin(angle / 2)]
             model.geom_rgba[visual_id] = [.10, .35, .75, 1]
+            model.geom_matid[visual_id] = model.material(
+                "joker_piece" if material_mode == "joker"
+                else "solid_piece").id
             model.geom_size[collision_id, 0] = max(.008, radius * .42)
             model.geom_contype[collision_id] = 1
         else:
@@ -167,7 +185,8 @@ def refresh_piece_geometry(model, data, seed: int, piece_count: int):
     return polygons, placements
 
 
-def build_scene_xml(seed: int = 7, piece_count: int = 4) -> str:
+def build_scene_xml(seed: int = 7, piece_count: int = 4,
+                    material_mode: str = "color") -> str:
     """Return MJCF. Generated geometry never leaves this scene boundary."""
     polygons, placements = generate_scene_geometry(seed, piece_count)
 
@@ -176,6 +195,8 @@ def build_scene_xml(seed: int = 7, piece_count: int = 4) -> str:
         for i, polygon in enumerate(polygons)
     )
     piper_mesh_dir = ROOT / "mujoco_sim" / "assets" / "piper_l" / "meshes"
+    joker_path = ROOT / "mujoco_sim" / "assets" / "cards" / "big_joker.png"
+    piece_material = "joker_piece" if material_mode == "joker" else "solid_piece"
     piper_assets = "\n".join(
         f'<mesh name="piper_{name.lower()}" file="{piper_mesh_dir / (name + ".STL")}"/>'
         for name in ("base_link", "Link1", "Link2", "Link3",
@@ -194,7 +215,7 @@ def build_scene_xml(seed: int = 7, piece_count: int = 4) -> str:
               quat="{math.cos(angle/2):.7f} 0 0 {math.sin(angle/2):.7f}">
           <freejoint name="piece_{i}_free"/>
           <geom name="piece_{i}_geom" type="mesh" mesh="piece_mesh_{i}"
-                mass="0.00001" rgba="0.10 0.35 0.75 1"
+                mass="0.00001" material="{piece_material}"
                 contype="0" conaffinity="0"/>
           <geom name="piece_{i}_collision" type="cylinder"
                 size="{collision_radius:.6f} 0.001"
@@ -221,6 +242,10 @@ def build_scene_xml(seed: int = 7, piece_count: int = 4) -> str:
   <asset>
     <material name="paper" rgba="0.90 0.90 0.90 1"/>
     <material name="table" rgba="0.18 0.20 0.22 1"/>
+    <texture name="joker_card" type="2d" file="{joker_path}"/>
+    <material name="solid_piece" rgba="0.10 0.35 0.75 1"/>
+    <material name="joker_piece" texture="joker_card"
+              rgba="0.42 0.62 0.78 1"/>
     {mesh_assets}
     {piper_assets}
   </asset>

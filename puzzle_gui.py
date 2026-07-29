@@ -25,6 +25,7 @@ class PuzzleGUI:
 
         self.seed = tk.IntVar(value=7)
         self.piece_count = tk.IntVar(value=4)
+        self.material_mode = tk.StringVar(value="纯色卡纸")
         self.status = tk.StringVar(value="输入随机种子，然后生成场景")
         self.scene = None
         self.pieces = None
@@ -84,6 +85,13 @@ class PuzzleGUI:
         ttk.Label(count_row, text="碎片数量（1～4）").pack(side="left")
         ttk.Spinbox(count_row, from_=1, to=4, textvariable=self.piece_count,
                     width=12, state="readonly").pack(side="right")
+        material_row = ttk.Frame(controls)
+        material_row.pack(fill="x", pady=(0, 9))
+        ttk.Label(material_row, text="卡片素材").pack(side="left")
+        ttk.Combobox(
+            material_row, textvariable=self.material_mode, state="readonly",
+            values=("纯色卡纸", "大鬼扑克牌"), width=12).pack(side="right")
+        self.material_mode.trace_add("write", lambda *_: self.generate())
         speed_row = ttk.Frame(controls)
         speed_row.pack(fill="x", pady=(0, 9))
         ttk.Label(speed_row, text="同步动画速度").pack(side="left")
@@ -168,7 +176,10 @@ class PuzzleGUI:
             self.edge_text.delete("1.0", "end")
             self.waiting_for_scene = True
             self.status.set("正在同步生成视觉场景并打开独立 MuJoCo 窗口…")
-            self.mujoco.send("generate", self.seed.get(), count)
+            self.mujoco.send(
+                "generate", self.seed.get(), count,
+                "joker" if self.material_mode.get() == "大鬼扑克牌"
+                else "color")
         except Exception as exc:
             messagebox.showerror("生成失败", str(exc))
 
@@ -257,7 +268,8 @@ class PuzzleGUI:
                     self._show(self.scene)
                     self.status.set(
                         f"种子 {self.seed.get()}：视觉页面与 MuJoCo 已同步生成 "
-                        f"{self.piece_count.get()} 块碎片")
+                        f"{self.piece_count.get()} 块碎片；"
+                        f"素材={self.material_mode.get()}")
                 elif event[0] == "detected":
                     self.status.set(
                         f"视觉识别已同步到 MuJoCo：检测到 {event[1]} 块碎片")
@@ -274,7 +286,9 @@ class PuzzleGUI:
                         event[1], event[2], event[3])
                 elif event[0] == "done":
                     self.current_image = sim.render_solution(
-                        self.scene, self.pieces, self.transforms)
+                        self.scene, self.pieces, self.transforms,
+                        preserve_texture=(
+                            self.material_mode.get() == "大鬼扑克牌"))
                     self._show(self.current_image)
                     self.status.set(
                         "双窗口同步拼接完成：目标矩形 10 cm × 6 cm")
@@ -293,7 +307,9 @@ class PuzzleGUI:
         if self.animation_piece >= count:
             self.animation_job = None
             self.current_image = sim.render_solution(
-                self.scene, self.pieces, self.transforms)
+                self.scene, self.pieces, self.transforms,
+                preserve_texture=(
+                    self.material_mode.get() == "大鬼扑克牌"))
             self._show(self.current_image)
             self.status.set(
                 f"拼接动画完成：{count} 块碎片已依次移动到 10 cm × 6 cm 目标矩形")

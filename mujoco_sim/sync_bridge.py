@@ -125,13 +125,14 @@ def _child(connection, speed):
             try:
                 if command[0] == "generate":
                     seed, requested_count = int(command[1]), int(command[2])
-                    key = (seed, requested_count)
+                    material_mode = command[3] if len(command) > 3 else "color"
+                    key = (seed, requested_count, material_mode)
                     # Reusing an unchanged scene keeps the native MuJoCo
                     # window alive instead of flashing off and on.
                     if renderer is None:
                         piece_count = 4
                         model = mujoco.MjModel.from_xml_string(
-                            build_scene_xml(seed, 4))
+                            build_scene_xml(seed, 4, material_mode))
                         data = mujoco.MjData(model)
                         controller = ArmController(model, data, 4)
                         for _ in range(30):
@@ -153,7 +154,7 @@ def _child(connection, speed):
                         mujoco.mj_resetData(model, data)
                         controller.reset_home()
                         refresh_piece_geometry(
-                            model, data, seed, requested_count)
+                            model, data, seed, requested_count, material_mode)
                         for mesh_index in range(4):
                             mesh_id = model.mesh(
                                 f"piece_mesh_{mesh_index}").id
