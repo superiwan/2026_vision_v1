@@ -77,7 +77,7 @@ def apply_h(points: np.ndarray, h: np.ndarray) -> np.ndarray:
 
 
 def place_randomly(polys: list[np.ndarray], rng: np.random.Generator):
-    placed, poses = [], []
+    placed = []
     occupancy = np.zeros((DIVIDER_Y - 25, CANVAS_W), np.uint8)
     # Place large pieces first so that 3-piece layouts do not trap the largest
     # sector in the remaining narrow gaps.
@@ -100,15 +100,12 @@ def place_randomly(polys: list[np.ndarray], rng: np.random.Generator):
             dilated = cv2.dilate(mask, np.ones((19, 19), np.uint8))
             if not np.any((dilated > 0) & (occupancy > 0)):
                 cv2.fillPoly(occupancy, [np.round(scene_poly).astype(np.int32)], 255)
-                # local-to-scene; original-to-scene is local shift followed by this.
-                pose = rigid(angle, tx, ty) @ rigid(0, -centroid[0], -centroid[1])
                 placed.append(scene_poly)
-                poses.append(pose)
                 accepted = True
                 break
         if not accepted:
             raise RuntimeError("无法在上半区无重叠摆放碎片，请更换随机种子")
-    return placed, poses
+    return placed
 
 
 def render_scene(placed: list[np.ndarray]) -> np.ndarray:
@@ -127,6 +124,24 @@ def render_scene(placed: list[np.ndarray]) -> np.ndarray:
         # of the segmented foreground instead of clipping polygon corners.
         cv2.polylines(image, [pts], True, (105, 52, 16), 2, cv2.LINE_AA)
     return image
+
+
+def generate_camera_frame(seed: int, piece_count: int) -> np.ndarray:
+    """Generation boundary: return pixels only, never geometry or true poses."""
+    rng = np.random.default_rng(seed)
+    source_polygons = random_cut(rng, piece_count)
+    placed_polygons = place_randomly(source_polygons, rng)
+    rendered = render_scene(placed_polygons)
+
+    # Simulate a camera/file boundary. Geometry variables stay local to this
+    # function and the vision stage receives only decoded image pixels.
+    ok, encoded = cv2.imencode(".png", rendered)
+    if not ok:
+        raise RuntimeError("仿真相机图像编码失败")
+    camera_frame = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    if camera_frame is None:
+        raise RuntimeError("仿真相机图像解码失败")
+    return camera_frame
 
 
 def order_clockwise(vertices: np.ndarray) -> np.ndarray:
@@ -346,6 +361,13 @@ def solve(pieces: list[np.ndarray]):
     return final, matches
 
 
+def analyze_camera_frame(image: np.ndarray):
+    """Pure vision/planning boundary: input is an image, output is detected poses."""
+    detected = detect_pieces(image)
+    transforms, matches = solve(detected)
+    return detected, transforms, matches
+
+
 def annotate_detection(image, pieces):
     out = image.copy()
     for i, p in enumerate(pieces):
@@ -388,12 +410,13 @@ def make_summary(scene, detected, solution):
 
 
 def run_once(seed: int, output: Path, save=True, piece_count: int = 4):
-    rng = np.random.default_rng(seed)
-    source = random_cut(rng, piece_count)
-    placed, _ground_truth = place_randomly(source, rng)
-    scene = render_scene(placed)
-    detected_pieces = detect_pieces(scene, piece_count)
-    transforms, matches = solve(detected_pieces)
+    scene = generate_camera_frame(seed, piece_count)
+    detected_pieces, transforms, matches = analyze_camera_frame(scene)
+    # This assertion belongs to simulation evaluation only. It is not supplied
+    # to detection or planning and cannot influence their result.
+    if len(detected_pieces) != piece_count:
+        raise RuntimeError(
+            f"独立视觉检测到 {len(detected_pieces)} 块，仿真评测设置为 {piece_count} 块")
 
     # Pixel-domain reconstruction metrics.
     restored = [apply_h(p, h) for p, h in zip(detected_pieces, transforms)]

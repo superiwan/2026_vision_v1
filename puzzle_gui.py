@@ -143,11 +143,8 @@ class PuzzleGUI:
             if self.animation_job is not None:
                 self.root.after_cancel(self.animation_job)
                 self.animation_job = None
-            rng = np.random.default_rng(self.seed.get())
             count = self.piece_count.get()
-            source = sim.random_cut(rng, count)
-            placed, _ = sim.place_randomly(source, rng)
-            self.scene = sim.render_scene(placed)
+            self.scene = sim.generate_camera_frame(self.seed.get(), count)
             self.pieces = self.transforms = self.matches = None
             self.current_image = self.scene
             self.matrix_text.delete("1.0", "end")
@@ -161,7 +158,9 @@ class PuzzleGUI:
         if self.scene is None:
             self.generate()
         try:
-            self.pieces = sim.detect_pieces(self.scene, self.piece_count.get())
+            # Detection receives only camera pixels; the generator's polygons,
+            # adjacency and true transforms are not retained by the GUI.
+            self.pieces = sim.detect_pieces(self.scene)
             self.current_image = sim.annotate_detection(self.scene, self.pieces)
             self._show(self.current_image)
             vertices = "，".join(f"P{i}: {len(p)} 个顶点" for i, p in enumerate(self.pieces))
