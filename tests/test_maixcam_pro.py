@@ -233,15 +233,16 @@ class MaixCamProPipelineTest(unittest.TestCase):
         _, _, merge_fill_ratio = solve_merge(pieces, paper)
         self.assertGreater(merge_fill_ratio, 0.95)
 
-    def test_lab_a4_filter_rejects_dark_colored_distractors(self):
+    def test_otsu_a4_detector_keeps_largest_a4_with_dark_distractors(self):
         frame = reference_perspective_scene()
         cv2.rectangle(frame, (0, 80), (55, 470), (18, 18, 78), -1)
         cv2.rectangle(frame, (585, 60), (639, 450), (78, 22, 18), -1)
         detector = A4PieceDetector()
         found = lock_a4(detector, frame)
         self.assertTrue(found["paper_locked"])
-        self.assertEqual(detector.paper_binary[200, 20], 0)
-        self.assertEqual(detector.paper_binary[200, 620], 0)
+        self.assertIsNotNone(found["homography"])
+        pieces = detector.analyze_cached_a4(frame)
+        self.assertEqual(len(pieces["pieces"]), 3)
 
     def test_one_button_workflow_advances_one_heavy_stage_per_frame(self):
         frame = reference_perspective_scene()

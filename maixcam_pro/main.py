@@ -46,6 +46,8 @@ def run():
     cam.skip_frames(config.CAMERA_SKIP_FRAMES)
 
     workflow = PuzzleWorkflow()
+    if config.AUTO_START_ON_BOOT:
+        workflow.start()
     view = StepView(config.CAMERA_WIDTH, config.CAMERA_HEIGHT)
     button = ReleaseButton()
     fps = 0.0

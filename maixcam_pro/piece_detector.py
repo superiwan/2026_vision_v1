@@ -1,4 +1,4 @@
-"""Cached A4 location and one-shot piece detection adapted from D:\\26_new."""
+"""Cached A4 location and one-shot piece detection aligned with D:\\26_new main."""
 
 import math
 import time
@@ -161,14 +161,12 @@ def approximate_piece(contour):
         polygon = approximation[:, 0, :].astype(np.float32)
         polygon = _refine_polygon_vertices(contour, polygon)
         iou, area_error = _contour_polygon_quality(contour, polygon)
-        # A tiny extra corner caused by glare or a jagged paper edge can break
-        # edge matching. Prefer the simpler fit when its pixel fit is nearly
-        # identical, while retaining genuine five-sided pieces.
-        score = (iou - 0.35 * area_error
-                 - config.PIECE_VERTEX_PENALTY * (len(polygon) - 3))
+        score = iou - 0.35 * area_error
         if score > best_score:
             best, best_score = polygon, score
-    return None if best is None else _canonical_polygon(best)
+    if best is not None and cv2.contourArea(best, oriented=True) < 0:
+        best = best[::-1].copy()
+    return best
 
 
 class A4PieceDetector:
@@ -190,12 +188,9 @@ class A4PieceDetector:
 
         self.gray = None
         self.blurred = None
-        self.lab = None
         self.edge_map = None
         self.paper_binary = None
         self.paper_work = None
-        self.candidate_mask = None
-        self.candidate_work = None
         self.warped_color = np.empty(
             (config.A4_WARP_HEIGHT, config.A4_WARP_WIDTH, 3), np.uint8)
         self.warped_gray = np.empty(
@@ -204,8 +199,6 @@ class A4PieceDetector:
         self.piece_work = np.empty_like(self.warped_gray)
         self.paper_kernel = np.ones(
             (config.PAPER_CLOSE_KERNEL, config.PAPER_CLOSE_KERNEL), np.uint8)
-        self.paper_open_kernel = np.ones(
-            (config.PAPER_OPEN_KERNEL, config.PAPER_OPEN_KERNEL), np.uint8)
         self.piece_kernel = np.ones(
             (config.MORPH_KERNEL, config.MORPH_KERNEL), np.uint8)
         self.has_analysis = False
@@ -222,12 +215,9 @@ class A4PieceDetector:
             return
         self.gray = np.empty(shape, np.uint8)
         self.blurred = np.empty(shape, np.uint8)
-        self.lab = np.empty(shape + (3,), np.uint8)
         self.edge_map = np.empty(shape, np.uint8)
         self.paper_binary = np.empty(shape, np.uint8)
         self.paper_work = np.empty(shape, np.uint8)
-        self.candidate_mask = np.empty(shape, np.uint8)
-        self.candidate_work = np.empty(shape, np.uint8)
         self.clear_a4()
 
     def _clear_analysis(self):
@@ -247,7 +237,7 @@ class A4PieceDetector:
         self._clear_analysis()
 
     def prepare_preview(self, frame):
-        """Build a neutral-black LAB mask inside the configured search ROI."""
+        """Build the same grayscale/Otsu black-paper mask as D:\\26_new main."""
         self._ensure_frame_buffers(frame)
         timings = {}
         start = time.perf_counter()
@@ -255,32 +245,15 @@ class A4PieceDetector:
         cv2.GaussianBlur(
             self.gray, (config.PAPER_BLUR_KERNEL, config.PAPER_BLUR_KERNEL),
             0, dst=self.blurred)
-        cv2.cvtColor(frame, cv2.COLOR_BGR2LAB, dst=self.lab)
         timings["gray"] = _ms(start)
 
         start = time.perf_counter()
-        lower = np.uint8((
-            round(config.PAPER_LAB_L_MIN * 255.0 / 100.0),
-            config.PAPER_LAB_A_MIN + 128,
-            config.PAPER_LAB_B_MIN + 128,
-        ))
-        upper = np.uint8((
-            round(config.PAPER_LAB_L_MAX * 255.0 / 100.0),
-            config.PAPER_LAB_A_MAX + 128,
-            config.PAPER_LAB_B_MAX + 128,
-        ))
-        cv2.inRange(self.lab, lower, upper, dst=self.paper_binary)
-        left, top, right, bottom = self._paper_roi()
-        self.paper_binary[:top, :] = 0
-        self.paper_binary[bottom:, :] = 0
-        self.paper_binary[:, :left] = 0
-        self.paper_binary[:, right:] = 0
+        cv2.threshold(self.blurred, 0, 255,
+                      cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
+                      dst=self.paper_binary)
         cv2.morphologyEx(
             self.paper_binary, cv2.MORPH_CLOSE, self.paper_kernel,
             dst=self.paper_work, iterations=config.PAPER_CLOSE_ITERATIONS)
-        cv2.morphologyEx(
-            self.paper_work, cv2.MORPH_OPEN, self.paper_open_kernel,
-            dst=self.paper_work, iterations=config.PAPER_OPEN_ITERATIONS)
         timings["paper_bin"] = _ms(start)
         timings.update({"paper": 0.0, "warp": 0.0, "pieces": 0.0})
         self.last_timings = timings
@@ -298,8 +271,7 @@ class A4PieceDetector:
         quad = np.asarray(quad, dtype=np.float32).reshape(4, 2)
         quad_area = abs(cv2.contourArea(quad))
         area_ratio = quad_area / frame_area
-        if not (config.PAPER_MIN_AREA_RATIO <= area_ratio
-                <= config.PAPER_MAX_AREA_RATIO):
+        if area_ratio < config.PAPER_MIN_AREA_RATIO:
             return None
 
         sides = [
@@ -315,48 +287,7 @@ class A4PieceDetector:
         aspect_error /= config.PAPER_A4_ASPECT_RATIO
         if aspect_error > config.PAPER_ASPECT_REL_TOLERANCE:
             return None
-
-        opposite_a = min(sides[0], sides[2]) / max(sides[0], sides[2])
-        opposite_b = min(sides[1], sides[3]) / max(sides[1], sides[3])
-        if min(opposite_a, opposite_b) < config.PAPER_MIN_OPPOSITE_SIMILARITY:
-            return None
-        corner_cosine = max(
-            _corner_cosine(quad[index - 1], quad[index],
-                           quad[(index + 1) % 4])
-            for index in range(4)
-        )
-        if corner_cosine > config.PAPER_MAX_CORNER_COSINE:
-            return None
-
-        roi_left, roi_top, roi_right, roi_bottom = self._paper_roi()
-        border = config.PAPER_ROI_BORDER_MARGIN_PX
-        if (float(quad[:, 0].min()) <= roi_left + border
-                or float(quad[:, 0].max()) >= roi_right - border
-                or float(quad[:, 1].min()) <= roi_top + border
-                or float(quad[:, 1].max()) >= roi_bottom - border):
-            return None
-
-        self.candidate_mask.fill(0)
-        cv2.fillPoly(self.candidate_mask,
-                     [np.round(quad).astype(np.int32)], 255)
-        cv2.bitwise_and(self.paper_work, self.candidate_mask,
-                        dst=self.candidate_work)
-        fill_ratio = min(1.0, cv2.countNonZero(self.candidate_work)
-                         / max(quad_area, 1.0))
-        if fill_ratio < config.PAPER_MIN_FILL_RATIO:
-            return None
-
-        center = quad.mean(axis=0)
-        roi_center = np.float32((
-            (roi_left + roi_right) * 0.5,
-            (roi_top + roi_bottom) * 0.5,
-        ))
-        center_error = np.linalg.norm(center - roi_center)
-        center_error /= max(width, height)
-        score = (area_ratio * fill_ratio
-                 - aspect_error * 0.20
-                 - center_error * 0.05)
-        return score
+        return area_ratio - aspect_error
 
     def _refine_a4_edges(self, quad):
         """Refine only four LAB-approved sides using local contrast edges."""
@@ -440,24 +371,20 @@ class A4PieceDetector:
         best_score = -float("inf")
         for contour in _find_contours(self.paper_work):
             if cv2.contourArea(contour) < (
-                    self.gray.size * config.PAPER_MIN_AREA_RATIO * 0.65):
+                    self.gray.size * config.PAPER_MIN_AREA_RATIO):
                 continue
-            hull = cv2.convexHull(contour)
-            perimeter = cv2.arcLength(hull, True)
-            for epsilon in config.PAPER_APPROX_EPSILON_RATIOS:
-                approximation = cv2.approxPolyDP(
-                    hull, epsilon * perimeter, True)
-                if (len(approximation) != 4
-                        or not cv2.isContourConvex(approximation)):
-                    continue
-                quad = order_quad(approximation[:, 0, :])
-                score = self._quad_quality(quad)
-                if score is None:
-                    continue
-                if score > best_score:
-                    best, best_score = quad, score
-                break
-        return None if best is None else self._refine_a4_edges(best)
+            perimeter = cv2.arcLength(contour, True)
+            approximation = cv2.approxPolyDP(contour, 0.025 * perimeter, True)
+            if (len(approximation) != 4
+                    or not cv2.isContourConvex(approximation)):
+                continue
+            quad = order_quad(approximation[:, 0, :])
+            score = self._quad_quality(quad)
+            if score is None:
+                continue
+            if score > best_score:
+                best, best_score = quad, score
+        return best
 
     def _fixed_a4_quad(self):
         """Return the calibrated work-mat quadrilateral for this camera rig."""
@@ -480,28 +407,21 @@ class A4PieceDetector:
             self.gray[border > 0] < config.PAPER_FIXED_QUAD_MAX_BORDER_GRAY))
         if dark_ratio < config.PAPER_FIXED_QUAD_MIN_DARK_BORDER_RATIO:
             return None
-        return quad
+        # Keep calibrated and automatically found mats on the exact same
+        # canonical orientation.  In particular, a landscape work mat must
+        # be rotated before it is mapped into the portrait A4 plane.
+        return order_quad(quad)
 
     def find_a4_from_preview(self):
-        """Confirm one stable LAB/geometry candidate, then cache its warp."""
+        """Cache the largest black convex A4-like quadrilateral."""
         start = time.perf_counter()
         quad = self._find_a4_quad()
-        used_fixed_quad = False
         self.paper_generation += 1
         self.paper_search_attempts += 1
         self._clear_analysis()
         self.paper_locked = False
         self.homography = None
         self.inverse_homography = None
-        # In the fixed competition rig, cables, hands, or nearby black objects
-        # can merge with the black mat in a LAB binary image.  Do not keep the
-        # CPU in a slow 12-frame retry loop in that case: use the calibrated
-        # quadrilateral after the initial automatic attempt.
-        if (quad is None
-                and self.paper_search_attempts
-                >= config.PAPER_FIXED_QUAD_AFTER_ATTEMPTS):
-            quad = self._fixed_a4_quad()
-            used_fixed_quad = quad is not None
 
         if quad is None:
             self.paper_quad = None
@@ -509,37 +429,22 @@ class A4PieceDetector:
             self.paper_candidate_quad = None
             self.paper_stable_count = 0
         else:
-            stable_threshold = config.PAPER_STABLE_MAX_CORNER_SHIFT_PX
-            stable_threshold *= max(1.0, self.gray.shape[1]
-                                    / float(config.CAMERA_WIDTH))
-            if self.paper_candidate_quad is None:
-                self.paper_stable_count = 1
-            else:
-                movement = np.max(np.linalg.norm(
-                    quad - self.paper_candidate_quad, axis=1))
-                self.paper_stable_count = (
-                    self.paper_stable_count + 1
-                    if movement <= stable_threshold else 1
-                )
+            self.paper_stable_count = 1
             self.paper_candidate_quad = quad.copy()
             self.paper_quad = quad
             self.paper_contour = np.round(quad).astype(
                 np.int32).reshape(-1, 1, 2)
-            required_frames = (1 if used_fixed_quad
-                               else config.PAPER_STABLE_FRAMES)
-            if self.paper_stable_count >= required_frames:
-                destination = np.float32((
-                    (0, 0),
-                    (config.A4_WARP_WIDTH - 1, 0),
-                    (config.A4_WARP_WIDTH - 1,
-                     config.A4_WARP_HEIGHT - 1),
-                    (0, config.A4_WARP_HEIGHT - 1),
-                ))
-                self.homography = cv2.getPerspectiveTransform(
-                    quad, destination)
-                self.inverse_homography = cv2.getPerspectiveTransform(
-                    destination, quad)
-                self.paper_locked = True
+            destination = np.float32((
+                (0, 0),
+                (config.A4_WARP_WIDTH - 1, 0),
+                (config.A4_WARP_WIDTH - 1,
+                 config.A4_WARP_HEIGHT - 1),
+                (0, config.A4_WARP_HEIGHT - 1),
+            ))
+            self.homography = cv2.getPerspectiveTransform(quad, destination)
+            self.inverse_homography = cv2.getPerspectiveTransform(
+                destination, quad)
+            self.paper_locked = True
         timings = dict(self.last_timings)
         timings["paper"] = _ms(start)
         self.last_timings = timings
@@ -575,12 +480,14 @@ class A4PieceDetector:
 
         start = time.perf_counter()
         a4_area = config.A4_WARP_WIDTH * config.A4_WARP_HEIGHT
-        contours = [
-            contour for contour in _find_contours(self.piece_binary)
-            if a4_area * config.PIECE_MIN_AREA_RATIO
-            <= cv2.contourArea(contour)
-            <= a4_area * config.PIECE_MAX_AREA_RATIO
-        ]
+        raw_contours = _find_contours(self.piece_binary)
+        contours = []
+        for contour in raw_contours:
+            area = cv2.contourArea(contour)
+            if not (a4_area * config.PIECE_MIN_AREA_RATIO <= area
+                    <= a4_area * config.PIECE_MAX_AREA_RATIO):
+                continue
+            contours.append(contour)
         contours.sort(key=cv2.contourArea, reverse=True)
         timings["contours"] = _ms(start)
 

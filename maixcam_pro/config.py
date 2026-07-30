@@ -6,9 +6,12 @@ CAMERA_HEIGHT = 480
 CAMERA_FPS = 60
 CAMERA_BUFFERS = 3
 CAMERA_SKIP_FRAMES = 30
+# Run one hands-free validation after deployment.  Set to False after the
+# mounted work-mat calibration has been accepted for normal touch operation.
+AUTO_START_ON_BOOT = True
 
-# Black A4 detection. LAB limits use the MaixPy scale documented by Sipeed:
-# L is 0..100 and A/B are -128..127; piece_detector converts them to OpenCV.
+# Black A4 detection.  Keep this aligned with D:\26_new main: grayscale,
+# GaussianBlur, Otsu inverse threshold, close, largest convex A4-like quad.
 PAPER_LAB_L_MIN = 0
 PAPER_LAB_L_MAX = 45
 PAPER_LAB_A_MIN = -18
@@ -17,7 +20,7 @@ PAPER_LAB_B_MIN = -18
 PAPER_LAB_B_MAX = 18
 PAPER_ROI_MARGIN_X_RATIO = 0.04
 PAPER_ROI_MARGIN_Y_RATIO = 0.01
-PAPER_MIN_AREA_RATIO = 0.12
+PAPER_MIN_AREA_RATIO = 0.18
 PAPER_MAX_AREA_RATIO = 0.75
 PAPER_MIN_FILL_RATIO = 0.78
 PAPER_MIN_OPPOSITE_SIMILARITY = 0.65
@@ -38,21 +41,23 @@ PAPER_EDGE_MIN_POINTS_RATIO = 0.05
 PAPER_EDGE_CANNY_LOW = 35
 PAPER_EDGE_CANNY_HIGH = 110
 PAPER_EDGE_REFINE_MIN_SHORT_SIDE = 720
-PAPER_STABLE_FRAMES = 3
+PAPER_STABLE_FRAMES = 1
 PAPER_STABLE_MAX_CORNER_SHIFT_PX = 8.0
-PAPER_SEARCH_MAX_FRAMES = 12
+PAPER_SEARCH_MAX_FRAMES = 1
 PAPER_GUIDE_LANDSCAPE = True
 
 # The competition rig uses a fixed overhead camera and a fixed black work mat.
 # Its corners are expressed as (x / frame_width, y / frame_height), ordered
-# exactly as the portrait canonical plane: bottom-left, top-left, top-right,
-# bottom-right.  Keep the automatic LAB detector first; this is a robust
+# exactly as OpenCV's canonical plane: top-left, top-right, bottom-right,
+# bottom-left.  Keep the automatic LAB detector first; this is a robust
 # fallback when the mat is visually connected to dark objects outside it.
 PAPER_FIXED_QUAD_RATIOS = (
-    (0.170, 0.979),
-    (0.193, 0.210),
-    (0.793, 0.146),
-    (0.845, 0.983),
+    # Calibrated against the MaixCAM Pro's 640x480 preview.  The order is
+    # top-left, top-right, bottom-right, bottom-left.
+    (0.100, 0.531),
+    (0.475, 0.531),
+    (0.608, 0.867),
+    (0.072, 0.854),
 )
 PAPER_FIXED_QUAD_AFTER_ATTEMPTS = 1
 PAPER_FIXED_QUAD_MAX_BORDER_GRAY = 185
@@ -67,15 +72,18 @@ A4_BORDER_INSET = 5
 PIECE_GRAY_MIN = 165
 PIECE_MIN_AREA_RATIO = 0.001
 PIECE_MAX_AREA_RATIO = 0.25
+PIECE_BORDER_REJECT_PX = 0
 PIECE_APPROX_EPSILON_RATIOS = (0.012, 0.018, 0.025, 0.035, 0.05, 0.07)
-PIECE_VERTEX_PENALTY = 0.006
+PIECE_VERTEX_PENALTY = 0.0
 MORPH_KERNEL = 3
 
-# Edge matching / assembly. 0.12 is retained from the original project.
+# Edge matching / assembly.  Keep algorithm 2 as the runtime default because
+# the D:\26_new main-style graph solver can reject noisy real-camera pieces
+# after the reference detector has correctly found them.
 SOLVER_ALGORITHM = 2
-EDGE_LENGTH_TOLERANCE = 0.12
+EDGE_LENGTH_TOLERANCE = 0.15
 MAX_EDGE_CANDIDATES = 40
-MIN_RECTANGLE_FILL = 0.90
+MIN_RECTANGLE_FILL = 0.85
 
 # Algorithm 2: iterative contour merging.
 MERGE_ANGLE_TOLERANCE_DEG = 12.0

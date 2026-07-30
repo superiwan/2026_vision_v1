@@ -45,8 +45,19 @@ class PuzzleWorkflow:
         self._started_at = None
 
     def _solve(self):
-        solver = solve_graph if self.algorithm == 1 else solve_merge
-        return solver(self.result["pieces"], self.result["paper_rect"])
+        pieces = self.result["pieces"]
+        paper = self.result["paper_rect"]
+        if self.algorithm == 1:
+            return solve_graph(pieces, paper)
+        try:
+            return solve_merge(pieces, paper)
+        except Exception as merge_error:
+            # The contour-merging solver is preferred, but a slightly noisy
+            # real-camera polygon can miss one of its strict merge gates.
+            # Preserve the older independent graph solver as a real fallback
+            # before declaring a correctly detected set of pieces unusable.
+            print("MERGE FALLBACK:", merge_error)
+            return solve_graph(pieces, paper)
 
     def start(self):
         """Start a new automatic run; no further touch is required."""
@@ -100,6 +111,11 @@ class PuzzleWorkflow:
             if self.result["piece_error"]:
                 self._fail(self.result["piece_error"].upper())
             else:
+                print("PIECES:", [
+                    [[round(float(x), 1), round(float(y), 1)]
+                     for x, y in piece]
+                    for piece in self.result["pieces"]
+                ])
                 self.stage = self.SOLVE_PUZZLE
 
         elif self.stage == self.SOLVE_PUZZLE:
