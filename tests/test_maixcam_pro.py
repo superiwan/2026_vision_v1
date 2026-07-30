@@ -29,7 +29,8 @@ from puzzle_sim import place_randomly, random_cut
 
 def black_a4_scene(piece_count):
     rng = np.random.default_rng(300 + piece_count)
-    source = random_cut(rng, piece_count)
+    source = ([np.float64(((0, 0), (400, 0), (400, 240), (0, 240)))]
+              if piece_count == 1 else random_cut(rng, piece_count, "common"))
     placed = place_randomly(source, rng)
     # 900 x 1273 is a true sqrt(2) A4 plane, projected into a realistic camera
     # view with a bright margin so strict ROI/border filtering can accept it.
@@ -189,6 +190,29 @@ class MaixCamProPipelineTest(unittest.TestCase):
         self.assertEqual(len(matches), 3)
         self.assertGreater(fill_ratio, 0.99)
 
+    def test_upstream_v21_topologies_use_device_solver(self):
+        paper = np.int32((((0, 0),), ((419, 0),),
+                          ((419, 593),), ((0, 593),)))
+        modes = ("common", "boundary_fan", "strips", "equal_rectangles",
+                 "t_junction", "corner", "concave")
+        for mode in modes:
+            with self.subTest(mode=mode):
+                rng = np.random.default_rng(7)
+                source = random_cut(rng, 4, mode)
+                placed = place_randomly(source, rng)
+                auto_transforms, _auto_matches, auto_fill_ratio = solve(
+                    placed, paper)
+                self.assertEqual(len(auto_transforms), 4)
+                self.assertGreater(auto_fill_ratio, 0.85)
+                transforms, matches, fill_ratio = solve(
+                    placed, paper, cut_mode=mode)
+                self.assertEqual(len(transforms), 4)
+                self.assertGreater(fill_ratio, 0.85)
+                if mode == "t_junction":
+                    self.assertTrue(any(
+                        tuple(match[5:]) != (0.0, 1.0, 0.0, 1.0)
+                        for match in matches))
+
     def test_a4_cache_changes_only_when_find_is_triggered(self):
         frame = black_a4_scene(4)
         detector = A4PieceDetector()
@@ -249,7 +273,7 @@ class MaixCamProPipelineTest(unittest.TestCase):
         workflow = PuzzleWorkflow()
         view = StepView(640, 480)
 
-        self.assertEqual(workflow.algorithm, 2)
+        self.assertEqual(workflow.algorithm, 1)
         self.assertEqual(workflow.stage, workflow.READY)
         self.assertEqual(workflow.action_label, "START")
         workflow.start()

@@ -77,12 +77,22 @@ PIECE_APPROX_EPSILON_RATIOS = (0.012, 0.018, 0.025, 0.035, 0.05, 0.07)
 PIECE_VERTEX_PENALTY = 0.0
 MORPH_KERNEL = 3
 
-# Edge matching / assembly.  Keep algorithm 2 as the runtime default because
-# the D:\26_new main-style graph solver can reject noisy real-camera pieces
-# after the reference detector has correctly found them.
-SOLVER_ALGORITHM = 2
+# Edge matching / assembly. Algorithm 1 is the upstream v2.1 multi-topology
+# graph solver (full edges, T-junction partial edges, concave pieces and equal
+# rectangles). Algorithm 2 keeps the older iterative contour merger available
+# for field comparison.
+SOLVER_ALGORITHM = 1
 EDGE_LENGTH_TOLERANCE = 0.15
-MAX_EDGE_CANDIDATES = 40
+MAX_EDGE_CANDIDATES = 80
+PARTIAL_EDGE_MIN_RATIO = 0.22
+PARTIAL_EDGE_MAX_RATIO = 0.88
+PARTIAL_EDGE_PENALTY = 0.15
+TARGET_ASPECT_RATIO = 10.0 / 6.0
+EQUAL_RECTANGLE_SIZE_TOLERANCE = 0.12
+EQUAL_RECTANGLE_MIN_FILL = 0.985
+FAST_SEARCH_FULL_CANDIDATES = 8
+FAST_SEARCH_PARTIAL_CANDIDATES = 80
+FAST_SEARCH_ACCEPT_FILL = 0.97
 MIN_RECTANGLE_FILL = 0.85
 
 # Algorithm 2: iterative contour merging.

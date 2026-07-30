@@ -49,15 +49,7 @@ class PuzzleWorkflow:
         paper = self.result["paper_rect"]
         if self.algorithm == 1:
             return solve_graph(pieces, paper)
-        try:
-            return solve_merge(pieces, paper)
-        except Exception as merge_error:
-            # The contour-merging solver is preferred, but a slightly noisy
-            # real-camera polygon can miss one of its strict merge gates.
-            # Preserve the older independent graph solver as a real fallback
-            # before declaring a correctly detected set of pieces unusable.
-            print("MERGE FALLBACK:", merge_error)
-            return solve_graph(pieces, paper)
+        return solve_merge(pieces, paper)
 
     def start(self):
         """Start a new automatic run; no further touch is required."""

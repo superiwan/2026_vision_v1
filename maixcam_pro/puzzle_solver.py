@@ -45,7 +45,7 @@ def align_edge(src_a, src_b, dst_a, dst_b):
 
 
 def candidate_matchings(pieces):
-    """Shortlist equal-length edges from different pieces."""
+    """Shortlist upstream v2.1 full-edge and T-junction matches."""
     all_edges = {(piece_index, edge_index): edge
                  for piece_index, piece in enumerate(pieces)
                  for edge_index, edge in enumerate(edges(piece))}
@@ -57,29 +57,82 @@ def candidate_matchings(pieces):
         c, d = all_edges[(j, ej)]
         length_a = np.linalg.norm(b - a)
         length_b = np.linalg.norm(d - c)
-        relative_error = abs(length_a - length_b) / max(length_a, length_b)
+        relative_error = abs(length_a - length_b) / max(
+            length_a, length_b, 1e-9)
         if relative_error < config.EDGE_LENGTH_TOLERANCE:
-            candidates.append((relative_error, i, ei, j, ej))
+            candidates.append(
+                (relative_error, i, ei, j, ej, 0.0, 1.0, 0.0, 1.0))
+        ratio = min(length_a, length_b) / max(length_a, length_b, 1e-9)
+        if (config.PARTIAL_EDGE_MIN_RATIO <= ratio
+                <= config.PARTIAL_EDGE_MAX_RATIO):
+            penalty = config.PARTIAL_EDGE_PENALTY
+            if length_a > length_b:
+                candidates.extend((
+                    (penalty, i, ei, j, ej, 0.0, ratio, 0.0, 1.0),
+                    (penalty, i, ei, j, ej,
+                     1.0 - ratio, 1.0, 0.0, 1.0),
+                ))
+            else:
+                candidates.extend((
+                    (penalty, i, ei, j, ej, 0.0, 1.0, 0.0, ratio),
+                    (penalty, i, ei, j, ej,
+                     0.0, 1.0, 1.0 - ratio, 1.0),
+                ))
     candidates.sort()
     return candidates[:config.MAX_EDGE_CANDIDATES]
 
 
-def matching_sets(pieces):
-    """Recover the same degree-constrained adjacency graph as the source project."""
+def match_segments(pieces, match):
+    """Return the full or partial edge segments encoded by one match."""
+    _, i, edge_i, j, edge_j, ia0, ia1, ja0, ja1 = match
+    a, b = edges(pieces[i])[edge_i]
+    c, d = edges(pieces[j])[edge_j]
+    return (a + (b - a) * ia0, a + (b - a) * ia1,
+            c + (d - c) * ja0, c + (d - c) * ja1)
+
+
+def matching_sets(pieces, cut_mode="auto", max_full=None, max_partial=None):
+    """Enumerate connected v2.1 topology candidates without generator truth."""
     count = len(pieces)
     if count == 1:
         yield ()
         return
 
     candidates = candidate_matchings(pieces)
-    pair_count = 1 if count == 2 else count
-    required_degree = [1] * count if count == 2 else [2] * count
-    for combination in itertools.combinations(candidates, pair_count):
+    pair_count = (count if ((cut_mode == "common" and count >= 3)
+                            or (cut_mode == "concave" and count >= 2))
+                  else count - 1)
+    full = [match for match in candidates
+            if tuple(match[5:]) == (0.0, 1.0, 0.0, 1.0)]
+    partial = [match for match in candidates
+               if tuple(match[5:]) != (0.0, 1.0, 0.0, 1.0)]
+    if max_full is not None:
+        full = full[:max_full]
+    if max_partial is not None:
+        partial = partial[:max_partial]
+    if cut_mode == "t_junction" and count >= 3:
+        combinations = (
+            tuple(base) + (part,)
+            for base in itertools.combinations(full, pair_count - 1)
+            for part in partial)
+    elif cut_mode in {
+            "common", "boundary_fan", "strips", "corner", "concave",
+            "equal_rectangles", "sequential"}:
+        combinations = itertools.combinations(full, pair_count)
+    else:
+        combinations = itertools.chain(
+            itertools.combinations(full, pair_count),
+            (tuple(base) + (part,)
+             for base in itertools.combinations(full, pair_count - 1)
+             for part in partial),
+        )
+    for combination in combinations:
         used_edges = set()
         degree = [0] * count
         graph = [set() for _ in range(count)]
         valid = True
-        for _, i, ei, j, ej in combination:
+        for match in combination:
+            _, i, ei, j, ej = match[:5]
             if (i, ei) in used_edges or (j, ej) in used_edges:
                 valid = False
                 break
@@ -88,7 +141,10 @@ def matching_sets(pieces):
             degree[j] += 1
             graph[i].add(j)
             graph[j].add(i)
-        if not valid or degree != required_degree:
+        if not valid or any(value == 0 for value in degree):
+            continue
+        if (cut_mode == "common" and count >= 3
+                and any(value != 2 for value in degree)):
             continue
 
         visited, stack = {0}, [0]
@@ -123,9 +179,9 @@ def optimize_pose_graph(pieces, matches, initial):
     def residual(values):
         poses = unpack(values)
         result = []
-        for _, i, ei, j, ej in matches:
-            ia, ib = edges(pieces[i])[ei]
-            ja, jb = edges(pieces[j])[ej]
+        for match in matches:
+            _, i, _ei, j, _ej = match[:5]
+            ia, ib, ja, jb = match_segments(pieces, match)
             world_i = apply_h(np.array([ia, ib]), poses[i])
             world_j = apply_h(np.array([jb, ja]), poses[j])
             result.extend((world_i - world_j).ravel())
@@ -167,19 +223,42 @@ def _assembly_quality(assembled, matches, closure_error):
     contour = max(contours, key=cv2.contourArea)
     rect = cv2.minAreaRect(contour)
     rectangle_area = max(1.0, rect[1][0] * rect[1][1])
+    union_area = float(np.count_nonzero(union))
     contour_area = cv2.contourArea(contour)
-    fill_error = max(0.0, rectangle_area - contour_area)
-    fill_ratio = contour_area / rectangle_area
+    fill_error = max(0.0, rectangle_area - union_area)
+    fill_ratio = min(1.0, union_area / rectangle_area)
+    source_area = sum(abs(cv2.contourArea(
+        polygon.astype(np.float32))) for polygon in assembled)
+    expected_aspect = config.TARGET_ASPECT_RATIO
+    aspect = max(rect[1]) / max(1.0, min(rect[1]))
+    aspect_error = abs(math.log(max(aspect, 1e-9) / expected_aspect))
+    expected_width = math.sqrt(max(source_area, 1.0) * expected_aspect)
+    expected_height = expected_width / expected_aspect
+    expected_perimeter = 2.0 * (expected_width + expected_height)
+    disconnected_area = sum(cv2.contourArea(item) for item in contours)
+    disconnected_area -= contour_area
+    perimeter_error = abs(cv2.arcLength(contour, True) - expected_perimeter)
     match_error = sum(match[0] for match in matches) * 5000.0
-    score = closure_error * 5.0 + overlap * 3.0 + fill_error + match_error
+    score = (
+        closure_error * 8.0
+        + overlap * 12.0
+        + fill_error * 8.0
+        + abs(union_area - source_area) * 4.0
+        + abs(rectangle_area - source_area) * 3.0
+        + aspect_error * max(source_area, 1.0) * 0.85
+        + disconnected_area * 20.0
+        + perimeter_error * 25.0
+        + match_error
+    )
     return score, fill_ratio
 
 
 def assemble_from_matches(pieces, matches):
     adjacency = [[] for _ in pieces]
-    for _, i, ei, j, ej in matches:
-        adjacency[i].append((j, ei, ej))
-        adjacency[j].append((i, ej, ei))
+    for match in matches:
+        _, i, _ei, j, _ej = match[:5]
+        adjacency[i].append((j, match, False))
+        adjacency[j].append((i, match, True))
 
     transforms = [None] * len(pieces)
     transforms[0] = np.eye(3)
@@ -187,9 +266,10 @@ def assemble_from_matches(pieces, matches):
     closure_error = 0.0
     while stack:
         i = stack.pop()
-        for j, edge_i, edge_j in adjacency[i]:
-            ia, ib = edges(pieces[i])[edge_i]
-            ja, jb = edges(pieces[j])[edge_j]
+        for j, match, reversed_sides in adjacency[i]:
+            ia, ib, ja, jb = match_segments(pieces, match)
+            if reversed_sides:
+                ia, ib, ja, jb = ja, jb, ia, ib
             world_a, world_b = apply_h(
                 np.array([ia, ib]), transforms[i])
             proposed = align_edge(ja, jb, world_b, world_a)
@@ -207,6 +287,56 @@ def assemble_from_matches(pieces, matches):
                  for piece, transform in zip(pieces, transforms)]
     score, fill_ratio = _assembly_quality(assembled, matches, closure_error)
     return score, fill_ratio, transforms
+
+
+def _equal_rectangle_transforms(pieces):
+    """Resolve blank equal rectangles whose piece identities are unobservable."""
+    count = len(pieces)
+    if count not in (2, 3, 4):
+        return None
+    dimensions = []
+    for piece in pieces:
+        contour = piece.astype(np.float32).reshape(-1, 1, 2)
+        if len(piece) != 4 or not cv2.isContourConvex(contour):
+            return None
+        width, height = cv2.minAreaRect(contour)[1]
+        rectangle_area = max(width * height, 1.0)
+        if (abs(cv2.contourArea(contour)) / rectangle_area
+                < config.EQUAL_RECTANGLE_MIN_FILL):
+            return None
+        dimensions.append((min(width, height), max(width, height)))
+    dimensions = np.asarray(dimensions, dtype=np.float64)
+    mean = dimensions.mean(axis=0)
+    if np.any(np.ptp(dimensions, axis=0) / np.maximum(mean, 1.0)
+              > config.EQUAL_RECTANGLE_SIZE_TOLERANCE):
+        return None
+
+    if count == 4:
+        cell_width, cell_height = mean[1], mean[0]
+        slots = ((0.0, 0.0), (cell_width, 0.0),
+                 (0.0, cell_height), (cell_width, cell_height))
+    else:
+        cell_width, cell_height = mean[0], mean[1]
+        slots = tuple((index * cell_width, 0.0)
+                      for index in range(count))
+
+    transforms = []
+    for piece, slot in zip(pieces, slots):
+        best = None
+        for start, end in edges(piece):
+            vector = end - start
+            angle = -math.atan2(vector[1], vector[0])
+            rotation = rigid(angle)
+            rotated = apply_h(piece, rotation)
+            minimum, maximum = rotated.min(axis=0), rotated.max(axis=0)
+            size = maximum - minimum
+            cost = abs(size[0] - cell_width) + abs(size[1] - cell_height)
+            if best is None or cost < best[0]:
+                best = (cost, rotation, minimum)
+        _, rotation, minimum = best
+        transforms.append(
+            rigid(0.0, *(np.asarray(slot) - minimum)) @ rotation)
+    return transforms
 
 
 def _target_transform(pieces, transforms, paper):
@@ -241,21 +371,31 @@ def _target_transform(pieces, transforms, paper):
     return [translate @ normalize @ transform for transform in transforms]
 
 
-def solve(pieces, paper):
+def solve(pieces, paper, cut_mode="auto"):
     """Return final per-piece 3x3 transforms, selected matches and fill ratio."""
     if not 1 <= len(pieces) <= 4:
         raise ValueError("碎片数量必须为 1～4")
 
-    best = None
-    for matches in matching_sets(pieces):
-        result = assemble_from_matches(pieces, matches)
-        if result is not None and (best is None or result[0] < best[0]):
-            best = (*result, matches)
-    if best is None:
-        raise RuntimeError("未找到满足边长和邻接关系的矩形拼接")
-
-    _, fill_ratio, transforms, matches = best
-    transforms = optimize_pose_graph(pieces, matches, transforms)
+    transforms = (_equal_rectangle_transforms(pieces)
+                  if cut_mode in ("auto", "equal_rectangles") else None)
+    matches = ()
+    if transforms is None:
+        best = None
+        search_limits = ((config.FAST_SEARCH_FULL_CANDIDATES,
+                          config.FAST_SEARCH_PARTIAL_CANDIDATES),
+                         (None, None)) if cut_mode == "auto" else ((None, None),)
+        for max_full, max_partial in search_limits:
+            for candidate_matches in matching_sets(
+                    pieces, cut_mode, max_full, max_partial):
+                result = assemble_from_matches(pieces, candidate_matches)
+                if result is not None and (best is None or result[0] < best[0]):
+                    best = (*result, candidate_matches)
+            if best is not None and best[1] >= config.FAST_SEARCH_ACCEPT_FILL:
+                break
+        if best is None:
+            raise RuntimeError("未找到满足边长配对与碎片邻接关系的拼接")
+        _, _fill_ratio, transforms, matches = best
+        transforms = optimize_pose_graph(pieces, matches, transforms)
     assembled = [apply_h(piece, transform)
                  for piece, transform in zip(pieces, transforms)]
     _, fill_ratio = _assembly_quality(assembled, matches, 0.0)
@@ -282,4 +422,3 @@ def motion_commands(pieces, transforms):
             "matrix_3x3": transform.tolist(),
         })
     return commands
-
